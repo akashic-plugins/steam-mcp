@@ -2,14 +2,52 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+from typing import cast
 
-from agent.plugins import Plugin
+from pydantic import BaseModel, Field
+
+from agent.plugins import McpServerSpec, Plugin, ProactiveSourceSpec
+
+
+class SteamProactiveConfig(BaseModel):
+    enabled: bool = True
+
+
+class SteamConfig(BaseModel):
+    proactive: SteamProactiveConfig = Field(default_factory=SteamProactiveConfig)
 
 
 class SteamPlugin(Plugin):
     name = "steam"
-    version = "0.1.0"
+    version = "1.0.0"
     desc = "Steam MCP plugin"
+    ConfigModel = SteamConfig
+
+    @classmethod
+    def skill_roots(cls) -> tuple[str, ...]:
+        return ("skills",)
+
+    @classmethod
+    def mcp_servers(cls) -> list[McpServerSpec]:
+        return [
+            McpServerSpec(
+                name="steam",
+                command=("python", "mcp/run_mcp.py"),
+            )
+        ]
+
+    def proactive_sources(self) -> list[ProactiveSourceSpec]:
+        config = cast(SteamConfig, self.context.config)
+        if not config.proactive.enabled:
+            return []
+        return [
+            ProactiveSourceSpec(
+                id="presence",
+                channels=("context",),
+                server="steam",
+                fetch_tool="get_steam_context",
+            )
+        ]
 
     async def initialize(self) -> None:
         data_dir = self.context.data_dir
