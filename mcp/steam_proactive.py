@@ -23,6 +23,7 @@ _RUNTIME_DIR = Path(os.environ.get("AKA_PLUGIN_DATA_DIR", "").strip() or _SCRIPT
 _RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
 _DB_PATH = _RUNTIME_DIR / "steam_proactive.sqlite3"
 _CONFIG_PATH = _RUNTIME_DIR / "steam_mcp_config.json"
+_last_wake_presence = "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +160,7 @@ def get_context() -> dict[str, Any]:
     ).fetchone()
     if not latest:
         conn.close()
-        return {"available": False, "realtime": realtime}
+        return _with_wake_contract({"available": False, "realtime": realtime})
 
     recent_snap_at: str = latest["snapshotted_at"]
     recent_rows = conn.execute(
@@ -212,7 +213,7 @@ def get_context() -> dict[str, Any]:
     if prev_snap_at:
         prev_age_days = round((now_dt - datetime.fromisoformat(prev_snap_at)).total_seconds() / 86400, 1)
 
-    return {
+    payload = {
         "_hint": {
             "recent_snapshot_at": "本次快照时间戳",
             "prev_snapshot_at": "对比快照时间戳，null 表示尚无历史数据",
@@ -232,3 +233,59 @@ def get_context() -> dict[str, Any]:
         "games": games,
         "realtime": realtime,
     }
+    return _with_wake_contract(payload)
+
+
+def _with_wake_contract(
+    payload: dict[str, Any],
+    *,
+    observed_at: datetime | None = None,
+) -> dict[str, Any]:
+    global _last_wake_presence
+    realtime = payload.get("realtime")
+    realtime = realtime if isinstance(realtime, dict) else {}
+    status = str(realtime.get("online_status") or "unknown").strip().lower()
+    presence = {
+        "in-game": "in_game",
+        "online": "active",
+        "busy": "active",
+        "away": "idle",
+        "snooze": "idle",
+        "offline": "offline",
+    }.get(status, "unknown")
+    interruptibility = {
+        "in-game": 0.1,
+        "online": 0.8,
+        "busy": 0.1,
+        "away": 0.4,
+        "snooze": 0.3,
+        "offline": 0.0,
+    }.get(status, 0.4)
+    confidence = 0.9 if presence != "unknown" and not realtime.get("error") else 0.1
+    transition = ""
+    if _last_wake_presence != "unknown" and presence != _last_wake_presence:
+        transition = f"{_last_wake_presence}->{presence}"
+    if presence != "unknown":
+        _last_wake_presence = presence
+    observed = observed_at or _parse_observed_at(realtime.get("fetched_at"))
+    original = dict(payload)
+    return {
+        **original,
+        "presence": presence,
+        "interruptibility": interruptibility,
+        "confidence": confidence,
+        "transition": transition,
+        "observed_at": observed.isoformat(),
+        "expires_at": (observed + timedelta(minutes=5)).isoformat(),
+        "payload": original,
+    }
+
+
+def _parse_observed_at(value: object) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        return datetime.now(timezone.utc)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
