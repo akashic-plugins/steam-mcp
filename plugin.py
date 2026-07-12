@@ -19,7 +19,7 @@ class SteamConfig(BaseModel):
 
 class SteamPlugin(Plugin):
     name = "steam"
-    version = "1.0.0"
+    version = "1.1.0"
     desc = "Steam MCP plugin"
     ConfigModel = SteamConfig
 

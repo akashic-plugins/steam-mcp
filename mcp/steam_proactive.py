@@ -24,6 +24,7 @@ _RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
 _DB_PATH = _RUNTIME_DIR / "steam_proactive.sqlite3"
 _CONFIG_PATH = _RUNTIME_DIR / "steam_mcp_config.json"
 _last_wake_presence = "unknown"
+_DEFAULT_SNAPSHOT_INTERVAL_SECONDS = 6 * 3600
 
 
 # ---------------------------------------------------------------------------
@@ -31,11 +32,11 @@ _last_wake_presence = "unknown"
 # ---------------------------------------------------------------------------
 
 def _load_config() -> dict:
-    try:
+    if _CONFIG_PATH.exists():
         loaded = json.loads(_CONFIG_PATH.read_text())
         if not isinstance(loaded, dict):
-            loaded = {}
-    except Exception:
+            raise ValueError("steam_mcp_config.json 根节点必须是 object")
+    else:
         loaded = {}
     steam_api_key = os.environ.get("STEAM_API_KEY", "").strip()
     steam_id = os.environ.get("STEAM_ID", "").strip()
@@ -63,7 +64,14 @@ def _get_conn() -> sqlite3.Connection:
         playtime_forever_mins INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_snap_time ON snapshots(snapshotted_at);
+    CREATE TABLE IF NOT EXISTS snapshot_runs (
+        snapshotted_at TEXT PRIMARY KEY
+    );
     """)
+    conn.execute(
+        "INSERT OR IGNORE INTO snapshot_runs(snapshotted_at) "
+        "SELECT DISTINCT snapshotted_at FROM snapshots"
+    )
     conn.commit()
     return conn
 
@@ -111,7 +119,11 @@ def take_snapshot() -> dict:
         return {"ok": False, "error": str(e)}
 
     conn = _get_conn()
-    now = datetime.now(timezone.utc).isoformat()
+    now = _now().isoformat()
+    conn.execute(
+        "INSERT INTO snapshot_runs(snapshotted_at) VALUES (?)",
+        (now,),
+    )
     for g in games:
         conn.execute(
             "INSERT INTO snapshots (snapshotted_at, game_appid, game_name, "
@@ -129,6 +141,34 @@ def take_snapshot() -> dict:
     return {"ok": True, "snapshotted_at": now, "game_count": len(games)}
 
 
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _snapshot_interval_seconds(cfg: dict) -> int:
+    raw = cfg.get("snapshot_interval_seconds", _DEFAULT_SNAPSHOT_INTERVAL_SECONDS)
+    return max(300, int(raw))
+
+
+def _refresh_snapshot_if_due(cfg: dict) -> str | None:
+    """快照过期时刷新；失败原因交给主动上下文显式展示。"""
+
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT snapshotted_at FROM snapshot_runs "
+            "ORDER BY snapshotted_at DESC LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is not None:
+        latest = datetime.fromisoformat(str(row["snapshotted_at"]))
+        if (_now() - latest).total_seconds() < _snapshot_interval_seconds(cfg):
+            return None
+    result = take_snapshot()
+    return None if result["ok"] else str(result["error"])
+
+
 # ---------------------------------------------------------------------------
 # Context computation
 # ---------------------------------------------------------------------------
@@ -137,6 +177,7 @@ def get_context() -> dict[str, Any]:
     """返回结构化游戏上下文，供 proactive engine 注入 background_context。"""
     cfg = _load_config()
     steamid = cfg.get("steam_id", "")
+    snapshot_refresh_error = _refresh_snapshot_if_due(cfg)
 
     # 1. 实时状态（每次调用直接打 API，轻量）
     realtime: dict[str, Any] = {}
@@ -145,22 +186,28 @@ def get_context() -> dict[str, Any]:
             summary = _fetch_player_summary(steamid)
             _PERSONA = {0: "offline", 1: "online", 2: "busy", 3: "away", 4: "snooze"}
             realtime = {
-                "fetched_at": datetime.now(timezone.utc).isoformat(),
+                "fetched_at": _now().isoformat(),
                 "online_status": "in-game" if summary.get("gameid") else _PERSONA.get(summary.get("personastate", 0), "offline"),
                 "currently_playing": summary.get("gameextrainfo"),
             }
         except Exception as e:
-            realtime = {"fetched_at": datetime.now(timezone.utc).isoformat(), "error": str(e)}
+            realtime = {"fetched_at": _now().isoformat(), "error": str(e)}
 
     # 2. 读取快照
     conn = _get_conn()
 
     latest = conn.execute(
-        "SELECT snapshotted_at FROM snapshots ORDER BY snapshotted_at DESC LIMIT 1"
+        "SELECT snapshotted_at FROM snapshot_runs ORDER BY snapshotted_at DESC LIMIT 1"
     ).fetchone()
     if not latest:
         conn.close()
-        return _with_wake_contract({"available": False, "realtime": realtime})
+        return _with_wake_contract(
+            {
+                "available": False,
+                "realtime": realtime,
+                "snapshot_refresh_error": snapshot_refresh_error,
+            }
+        )
 
     recent_snap_at: str = latest["snapshotted_at"]
     recent_rows = conn.execute(
@@ -168,9 +215,9 @@ def get_context() -> dict[str, Any]:
     ).fetchall()
 
     # 上次快照：距今 ≥14 天中最新的一条
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()
+    cutoff = (_now() - timedelta(days=14)).isoformat()
     prev_meta = conn.execute(
-        "SELECT snapshotted_at FROM snapshots WHERE snapshotted_at <= ? "
+        "SELECT snapshotted_at FROM snapshot_runs WHERE snapshotted_at <= ? "
         "ORDER BY snapshotted_at DESC LIMIT 1",
         (cutoff,),
     ).fetchone()
@@ -195,7 +242,12 @@ def get_context() -> dict[str, Any]:
         prev_2w_h = round(prev_r["playtime_2w_mins"] / 60, 1) if prev_r else 0
         if recent_2w_h == 0 and prev_2w_h == 0:
             continue
-        r = recent_r or prev_r
+        if recent_r is not None:
+            r = recent_r
+        elif prev_r is not None:
+            r = prev_r
+        else:
+            raise RuntimeError(f"快照索引缺少 appid={appid}")
         all_time_h = round(max(r["playtime_forever_mins"], r["playtime_2w_mins"]) / 60, 1)
         games.append({
             "name": r["game_name"],
@@ -206,7 +258,7 @@ def get_context() -> dict[str, Any]:
     games.sort(key=lambda g: g["recent_2w_hours"], reverse=True)
 
     # 4. 时间元数据
-    now_dt = datetime.now(timezone.utc)
+    now_dt = _now()
     recent_dt = datetime.fromisoformat(recent_snap_at)
     data_freshness_h = round((now_dt - recent_dt).total_seconds() / 3600, 1)
     prev_age_days: float | None = None
@@ -232,6 +284,7 @@ def get_context() -> dict[str, Any]:
         "prev_snapshot_age_days": prev_age_days,
         "games": games,
         "realtime": realtime,
+        "snapshot_refresh_error": snapshot_refresh_error,
     }
     return _with_wake_contract(payload)
 
