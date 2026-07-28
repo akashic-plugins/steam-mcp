@@ -18,6 +18,7 @@ class SteamConfig(BaseModel):
 
 
 class SteamPlugin(Plugin):
+    api_version = 2
     name = "steam"
     version = "1.1.0"
     desc = "Steam MCP plugin"
@@ -49,7 +50,7 @@ class SteamPlugin(Plugin):
             )
         ]
 
-    async def initialize(self) -> None:
+    def activate(self) -> None:
         data_dir = self.context.data_dir
         workspace = self.context.workspace
         if data_dir is None or workspace is None:
