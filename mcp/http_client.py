@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import os
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -65,10 +64,6 @@ class HttpClient:
             raise SteamApiError(f"Steam API request failed: {exc.reason}") from exc
 
     def _load_api_key(self) -> str:
-        env_api_key = os.environ.get("STEAM_API_KEY", "").strip()
-        if env_api_key:
-            return env_api_key
-
         if not self.config_path.exists():
             raise SteamApiError(
                 f"Steam API key is required. Create `{self.config_path}` and set `steam_api_key`."
