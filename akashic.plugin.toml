@@ -1,0 +1,24 @@
+schema_version = 1
+name = "steam"
+version = "3.0.0"
+api_version = 3
+entrypoint = "plugin.py"
+
+[[python]]
+requirements = "mcp/requirements.txt"
+
+[validation]
+exclude_data_paths = [
+  "steam_mcp_config.json",
+  "steam_user_cache.json",
+  "steam_app_cache.json",
+  "steam_proactive.sqlite3",
+  ".steam-v2-migration.json",
+]
+
+[[mcp]]
+name = "steam"
+command = ["python", "mcp/run_mcp.py"]
+required_tools = ["get_steam_context"]
+candidate_read_only_tools = ["get_steam_context"]
+candidate_env = {STEAM_BACKEND = "recording"}

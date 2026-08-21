@@ -1,0 +1,18 @@
+{
+  "include": [
+    "plugin.py",
+    "mcp",
+    "scripts",
+    "tests"
+  ],
+  "exclude": ["**/__pycache__"],
+  "venvPath": "mcp",
+  "venv": ".venv",
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "pythonVersion": "3.13",
+      "extraPaths": ["mcp", ".akashic-core"]
+    }
+  ]
+}

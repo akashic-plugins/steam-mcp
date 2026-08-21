@@ -38,12 +38,6 @@ def _load_config() -> dict:
             raise ValueError("steam_mcp_config.json 根节点必须是 object")
     else:
         loaded = {}
-    steam_api_key = os.environ.get("STEAM_API_KEY", "").strip()
-    steam_id = os.environ.get("STEAM_ID", "").strip()
-    if steam_api_key:
-        loaded["steam_api_key"] = steam_api_key
-    if steam_id:
-        loaded["steam_id"] = steam_id
     return loaded
 
 

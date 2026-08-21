@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-import shutil
-from pathlib import Path
-from typing import cast
-
 from pydantic import BaseModel, Field
 
-from agent.plugins import McpServerSpec, Plugin, ProactiveSourceSpec
+from agent.plugin_composition import (
+    MCP_SERVERS,
+    PROACTIVE_COMPONENTS,
+    Context,
+    McpServerDefinition,
+    ProactiveSourceDefinition,
+)
 
 
 class SteamProactiveConfig(BaseModel):
@@ -17,73 +19,41 @@ class SteamConfig(BaseModel):
     proactive: SteamProactiveConfig = Field(default_factory=SteamProactiveConfig)
 
 
-class SteamPlugin(Plugin):
-    api_version = 2
-    name = "steam"
-    version = "1.1.0"
-    desc = "Steam MCP plugin"
-    ConfigModel = SteamConfig
+api_version = 3
+name = "steam"
+version = "3.0.0"
+desc = "Steam MCP plugin"
+Config = SteamConfig
+inject = (MCP_SERVERS, PROACTIVE_COMPONENTS)
+skill_roots = ("skills",)
 
-    @classmethod
-    def skill_roots(cls) -> tuple[str, ...]:
-        return ("skills",)
 
-    @classmethod
-    def mcp_servers(cls) -> list[McpServerSpec]:
-        return [
-            McpServerSpec(
-                name="steam",
-                command=("python", "mcp/run_mcp.py"),
-            )
-        ]
+async def apply(ctx: Context, config: object) -> None:
+    """声明 Steam MCP 与可选的主动上下文源。"""
 
-    def proactive_sources(self) -> list[ProactiveSourceSpec]:
-        config = cast(SteamConfig, self.context.config)
-        if not config.proactive.enabled:
-            return []
-        return [
-            ProactiveSourceSpec(
-                id="presence",
+    if not isinstance(config, SteamConfig):
+        raise TypeError("steam config 必须是 SteamConfig")
+
+    # 1. MCP 由 Core staged Python runtime 启动，candidate 仅开放 recording 上下文
+    await ctx.require(MCP_SERVERS).register(
+        ctx,
+        McpServerDefinition(
+            name="steam",
+            command=("python", "mcp/run_mcp.py"),
+            required_tools=("get_steam_context",),
+            candidate_read_only_tools=("get_steam_context",),
+            candidate_env={"STEAM_BACKEND": "recording"},
+        ),
+    )
+
+    # 2. 主动源只消费明确的 FetchItems/FetchEmpty 结果
+    if config.proactive.enabled:
+        await ctx.require(PROACTIVE_COMPONENTS).register(
+            ctx,
+            ProactiveSourceDefinition(
+                name="presence",
                 channels=("context",),
-                server="steam",
+                mcp_server="steam",
                 fetch_tool="get_steam_context",
-            )
-        ]
-
-    def activate(self) -> None:
-        data_dir = self.context.data_dir
-        workspace = self.context.workspace
-        if data_dir is None or workspace is None:
-            return
-        data_dir.mkdir(parents=True, exist_ok=True)
-        if _has_state(data_dir):
-            return
-        _copy_legacy_state(workspace / "mcp" / "steam-mcp", data_dir)
-
-
-def _has_state(data_dir: Path) -> bool:
-    for name in (
-        "steam_mcp_config.json",
-        "steam_user_cache.json",
-        "steam_app_cache.json",
-        "steam_proactive.sqlite3",
-    ):
-        if (data_dir / name).exists():
-            return True
-    return False
-
-
-def _copy_legacy_state(source_dir: Path, data_dir: Path) -> None:
-    if not source_dir.exists():
-        return
-    for name in (
-        "steam_mcp_config.json",
-        "steam_user_cache.json",
-        "steam_app_cache.json",
-        "steam_proactive.sqlite3",
-    ):
-        source = source_dir / name
-        target = data_dir / name
-        if not source.exists() or target.exists():
-            continue
-        shutil.copy2(source, target)
+            ),
+        )
