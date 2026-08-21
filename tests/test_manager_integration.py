@@ -33,6 +33,7 @@ def _stage_installed_plugin(tmp_path: Path) -> Path:
             artifact,
             ignore=shutil.ignore_patterns(
                 ".git",
+                ".akashic-core",
                 ".pytest_cache",
                 "__pycache__",
                 ".venv",
