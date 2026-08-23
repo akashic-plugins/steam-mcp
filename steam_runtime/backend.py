@@ -18,6 +18,29 @@ from steam_runtime.config import SteamRuntimeConfig, load_runtime_config
 _DB_NAME = "steam_proactive.sqlite3"
 _PRESENCE_REFRESH_SECONDS = 300
 _TRANSIENT_RETRY_SECONDS = 60
+_TABLE_SCHEMAS = {
+    "snapshots": (
+        ("id", "INTEGER", 0, None, 1),
+        ("snapshotted_at", "TEXT", 1, None, 0),
+        ("game_appid", "INTEGER", 1, None, 0),
+        ("game_name", "TEXT", 1, None, 0),
+        ("playtime_2w_mins", "INTEGER", 1, None, 0),
+        ("playtime_forever_mins", "INTEGER", 1, None, 0),
+    ),
+    "snapshot_runs": (("snapshotted_at", "TEXT", 0, None, 1),),
+    "current_state": (
+        ("singleton", "INTEGER", 0, None, 1),
+        ("presence_json", "TEXT", 0, None, 0),
+        ("presence_observed_at", "TEXT", 0, None, 0),
+        ("presence_expires_at", "TEXT", 0, None, 0),
+        ("current_games_json", "TEXT", 1, None, 0),
+        ("last_refresh_attempt_at", "TEXT", 0, None, 0),
+        ("last_refresh_error", "TEXT", 0, None, 0),
+        ("last_snapshot_checked_at", "TEXT", 0, None, 0),
+        ("last_history_fingerprint", "TEXT", 0, None, 0),
+        ("next_refresh_at", "TEXT", 1, None, 0),
+    ),
+}
 
 
 class SteamNetworkError(RuntimeError):
@@ -227,11 +250,129 @@ def state(data_root: Path, now: datetime) -> dict[str, object]:
 
 def _connect(data_root: Path) -> sqlite3.Connection:
     data_root.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(data_root / _DB_NAME, timeout=30)
+    database = data_root / _DB_NAME
+    if database.exists():
+        _validate_existing_database(database)
+    connection = sqlite3.connect(database, timeout=30)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA busy_timeout=30000")
+    try:
+        # 1. 只在只读盘点通过后，用一个事务安装或补齐兼容 schema。
+        connection.execute("BEGIN IMMEDIATE")
+        _install_schema(connection)
+        _validate_schema(connection)
+        connection.execute(
+            "INSERT OR IGNORE INTO snapshot_runs(snapshotted_at) "
+            "SELECT DISTINCT snapshotted_at FROM snapshots"
+        )
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        connection.close()
+        raise
     connection.execute("PRAGMA journal_mode=WAL")
-    connection.executescript(
+    return connection
+
+
+def _validate_schema(connection: sqlite3.Connection) -> None:
+    _validate_table_inventory(connection, require_all=True)
+
+
+def _validate_existing_database(database: Path) -> None:
+    """只读盘点既有数据库，保证失败不会留下迁移痕迹。"""
+
+    connection = sqlite3.connect(
+        f"file:{database.as_posix()}?mode=ro",
+        uri=True,
+        timeout=30,
+    )
+    connection.row_factory = sqlite3.Row
+    try:
+        _validate_table_inventory(connection, require_all=False)
+    finally:
+        connection.close()
+
+
+def _validate_table_inventory(
+    connection: sqlite3.Connection,
+    *,
+    require_all: bool,
+) -> None:
+    existing = {
+        str(row["name"])
+        for row in connection.execute(
+            """
+            SELECT name FROM sqlite_schema
+            WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+            """
+        ).fetchall()
+    }
+    unknown = existing - _TABLE_SCHEMAS.keys()
+    if unknown:
+        raise RuntimeError(
+            "Steam SQLite schema 不兼容: 未知表 " + ", ".join(sorted(unknown))
+        )
+    if require_all and existing != _TABLE_SCHEMAS.keys():
+        missing = _TABLE_SCHEMAS.keys() - existing
+        raise RuntimeError(
+            "Steam SQLite schema 不兼容: 缺少表 " + ", ".join(sorted(missing))
+        )
+    for table in sorted(existing):
+        actual = tuple(
+            (
+                str(row["name"]),
+                str(row["type"]).upper(),
+                int(row["notnull"]),
+                row["dflt_value"],
+                int(row["pk"]),
+            )
+            for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+        )
+        if actual != _TABLE_SCHEMAS[table]:
+            raise RuntimeError(f"Steam SQLite schema 不兼容: {table}")
+        _validate_table_constraints(connection, table)
+    _validate_snapshot_index(connection, required=require_all)
+
+
+def _validate_table_constraints(
+    connection: sqlite3.Connection,
+    table: str,
+) -> None:
+    row = connection.execute(
+        "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    if row is None or row["sql"] is None:
+        raise RuntimeError(f"Steam SQLite schema 不兼容: {table}")
+    compact = "".join(str(row["sql"]).lower().split())
+    if table == "snapshots" and "integerprimarykeyautoincrement" not in compact:
+        raise RuntimeError("Steam SQLite schema 不兼容: snapshots 缺少 AUTOINCREMENT")
+    if table == "current_state" and "check(singleton=1)" not in compact:
+        raise RuntimeError("Steam SQLite schema 不兼容: current_state 缺少 singleton CHECK")
+
+
+def _validate_snapshot_index(
+    connection: sqlite3.Connection,
+    *,
+    required: bool,
+) -> None:
+    row = connection.execute(
+        "SELECT name FROM sqlite_schema WHERE type = 'index' AND name = 'idx_snap_time'"
+    ).fetchone()
+    if row is None:
+        if required:
+            raise RuntimeError("Steam SQLite schema 不兼容: 缺少 idx_snap_time")
+        return
+    columns = tuple(
+        str(item["name"])
+        for item in connection.execute("PRAGMA index_info(idx_snap_time)").fetchall()
+    )
+    if columns != ("snapshotted_at",):
+        raise RuntimeError("Steam SQLite schema 不兼容: idx_snap_time")
+
+
+def _install_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
         """
         CREATE TABLE IF NOT EXISTS snapshots (
             id                    INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -240,10 +381,18 @@ def _connect(data_root: Path) -> sqlite3.Connection:
             game_name             TEXT NOT NULL,
             playtime_2w_mins      INTEGER NOT NULL,
             playtime_forever_mins INTEGER NOT NULL
-        );
+        )
+        """
+    )
+    connection.execute(
+        """
         CREATE TABLE IF NOT EXISTS snapshot_runs (
             snapshotted_at TEXT PRIMARY KEY
-        );
+        )
+        """
+    )
+    connection.execute(
+        """
         CREATE TABLE IF NOT EXISTS current_state (
             singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
             presence_json TEXT,
@@ -255,42 +404,12 @@ def _connect(data_root: Path) -> sqlite3.Connection:
             last_snapshot_checked_at TEXT,
             last_history_fingerprint TEXT,
             next_refresh_at TEXT NOT NULL
-        );
+        )
         """
     )
-    _validate_schema(connection)
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_snap_time ON snapshots(snapshotted_at)"
     )
-    connection.execute(
-        "INSERT OR IGNORE INTO snapshot_runs(snapshotted_at) "
-        "SELECT DISTINCT snapshotted_at FROM snapshots"
-    )
-    return connection
-
-
-def _validate_schema(connection: sqlite3.Connection) -> None:
-    required = {
-        "snapshots": {
-            "id", "snapshotted_at", "game_appid", "game_name",
-            "playtime_2w_mins", "playtime_forever_mins",
-        },
-        "snapshot_runs": {"snapshotted_at"},
-        "current_state": {
-            "singleton", "presence_json", "presence_observed_at",
-            "presence_expires_at", "current_games_json",
-            "last_refresh_attempt_at", "last_refresh_error",
-            "last_snapshot_checked_at", "last_history_fingerprint",
-            "next_refresh_at",
-        },
-    }
-    for table, expected in required.items():
-        columns = {
-            str(row["name"])
-            for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
-        }
-        if not expected <= columns:
-            raise RuntimeError(f"Steam SQLite schema 不兼容: {table}")
 
 
 def _ensure_current_row(connection: sqlite3.Connection, now: datetime) -> None:

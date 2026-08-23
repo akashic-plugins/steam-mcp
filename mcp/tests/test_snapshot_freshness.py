@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
@@ -90,7 +91,7 @@ def test_initialize_adopts_existing_history_without_rewriting_it(tmp_path) -> No
         ("2026-08-01T08:00:00+00:00", 1, "Old Game", 60, 660),
     ]
     with sqlite3.connect(database) as connection:
-        connection.executescript(
+        connection.execute(
             """
             CREATE TABLE snapshots (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -99,9 +100,11 @@ def test_initialize_adopts_existing_history_without_rewriting_it(tmp_path) -> No
                 game_name TEXT NOT NULL,
                 playtime_2w_mins INTEGER NOT NULL,
                 playtime_forever_mins INTEGER NOT NULL
-            );
-            CREATE TABLE snapshot_runs (snapshotted_at TEXT PRIMARY KEY);
+            )
             """
+        )
+        connection.execute(
+            "CREATE TABLE snapshot_runs (snapshotted_at TEXT PRIMARY KEY)"
         )
         connection.executemany(
             """
@@ -135,11 +138,86 @@ def test_initialize_adopts_existing_history_without_rewriting_it(tmp_path) -> No
     assert runs == [(row[0],) for row in existing]
 
 
+def test_legacy_schema_install_rolls_back_and_can_be_retried(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    database = tmp_path / "steam_proactive.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshotted_at TEXT NOT NULL,
+                game_appid INTEGER NOT NULL,
+                game_name TEXT NOT NULL,
+                playtime_2w_mins INTEGER NOT NULL,
+                playtime_forever_mins INTEGER NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO snapshots(
+                snapshotted_at, game_appid, game_name,
+                playtime_2w_mins, playtime_forever_mins
+            ) VALUES ('2026-08-01T08:00:00+00:00', 1, 'Old Game', 60, 600)
+            """
+        )
+        connection.commit()
+    before = database.read_bytes()
+
+    def interrupted(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            "CREATE TABLE snapshot_runs (snapshotted_at TEXT PRIMARY KEY)"
+        )
+        raise RuntimeError("fixture interrupted migration")
+
+    original = backend._install_schema
+    monkeypatch.setattr(backend, "_install_schema", interrupted)
+    with pytest.raises(RuntimeError, match="interrupted migration"):
+        backend.initialize(tmp_path, datetime(2026, 8, 23, tzinfo=UTC))
+
+    assert database.read_bytes() == before
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name"
+        ).fetchall() == [("snapshots",), ("sqlite_sequence",)]
+        assert connection.execute(
+            "SELECT game_name, playtime_forever_mins FROM snapshots"
+        ).fetchall() == [("Old Game", 600)]
+
+    monkeypatch.setattr(backend, "_install_schema", original)
+    backend.initialize(tmp_path, datetime(2026, 8, 23, tzinfo=UTC))
+    backend.initialize(tmp_path, datetime(2026, 8, 23, tzinfo=UTC))
+    current = backend.state(tmp_path, datetime(2026, 8, 23, tzinfo=UTC))
+    assert current["snapshot_runs"] == 1
+    assert current["snapshots"] == 1
+
+
 def test_incompatible_history_schema_fails_loud(tmp_path) -> None:
     database = tmp_path / "steam_proactive.sqlite3"
     with sqlite3.connect(database) as connection:
         connection.execute("CREATE TABLE snapshots(value TEXT NOT NULL)")
+        connection.execute("INSERT INTO snapshots(value) VALUES ('keep-me')")
         connection.commit()
+    before_bytes = database.read_bytes()
+    before_hash = hashlib.sha256(before_bytes).hexdigest()
+    before_sidecars = sorted(path.name for path in tmp_path.iterdir())
 
-    with pytest.raises(RuntimeError, match="schema 不兼容"):
-        backend.initialize(tmp_path, datetime(2026, 8, 23, tzinfo=UTC))
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="schema 不兼容"):
+            backend.initialize(tmp_path, datetime(2026, 8, 23, tzinfo=UTC))
+
+    assert database.read_bytes() == before_bytes
+    assert hashlib.sha256(database.read_bytes()).hexdigest() == before_hash
+    assert sorted(path.name for path in tmp_path.iterdir()) == before_sidecars
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT name, sql FROM sqlite_schema WHERE type = 'table'"
+        ).fetchall() == [
+            ("snapshots", "CREATE TABLE snapshots(value TEXT NOT NULL)")
+        ]
+        assert connection.execute("SELECT value FROM snapshots").fetchall() == [
+            ("keep-me",)
+        ]
