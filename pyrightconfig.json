@@ -1,6 +1,8 @@
 {
   "include": [
     "plugin.py",
+    "context_source.py",
+    "steam_runtime",
     "mcp",
     "scripts",
     "tests"

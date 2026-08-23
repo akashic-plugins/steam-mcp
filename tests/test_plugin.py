@@ -2,22 +2,24 @@ from __future__ import annotations
 
 import inspect
 from pathlib import Path
+from typing import cast
 
 import plugin
 import pytest
+from agent.control.timer import OneShotTimer
 from agent.plugin_composition import (
     MCP_SERVERS,
-    PROACTIVE_COMPONENTS,
+    TIMERS,
     CompositionRoot,
-    PluginProactiveComponents,
     PluginRuntime,
+    PluginTimers,
 )
 from agent.plugin_composition.mcp_slots import (
     PluginMcpServers,
     _freeze_plugin_mcp_servers,
 )
-from agent.plugin_composition.proactive import _freeze_plugin_proactive_components
 from agent.plugins.composable import ComposablePlugin
+from agent.plugins.manager import _copy_validation_data
 from agent.plugins.static_manifest import load_static_plugin_manifest
 
 
@@ -27,22 +29,23 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_pure_v3_exports_and_exact_apply() -> None:
     assert plugin.api_version == 3
     assert plugin.name == "steam"
-    assert plugin.version == "3.0.0"
+    assert plugin.version == "3.1.0"
     assert plugin.skill_roots == ("skills",)
     assert tuple(inspect.signature(plugin.apply).parameters) == ("ctx", "config")
     assert ComposablePlugin.from_module(plugin).skill_roots == ("skills",)
-    assert not hasattr(plugin, "SteamPlugin")
 
 
 @pytest.mark.asyncio
-async def test_apply_registers_mcp_and_proactive_without_data_writes(
+async def test_apply_registers_user_mcp_and_dormant_context_runtime(
     tmp_path: Path,
 ) -> None:
     root = CompositionRoot("steam:test")
     servers = PluginMcpServers(root.instance_token)
-    components = PluginProactiveComponents(root.instance_token)
     await root.context.provide(MCP_SERVERS, servers)
-    await root.context.provide(PROACTIVE_COMPONENTS, components)
+    await root.context.provide(
+        TIMERS,
+        PluginTimers(cast(OneShotTimer, object())),
+    )
     data_root = tmp_path / "plugin-data"
     await root.mount(
         ComposablePlugin.from_module(plugin),
@@ -60,37 +63,52 @@ async def test_apply_registers_mcp_and_proactive_without_data_writes(
         servers,
         root.instance_token,
     )["steam"].definition
-    source = _freeze_plugin_proactive_components(
-        components,
-        root.instance_token,
-        {"steam": "steam:test"},
-    ).source("presence")
-    assert server.command == ("python", "mcp/run_mcp.py")
-    assert server.required_tools == ("get_steam_context",)
-    assert server.candidate_read_only_tools == ("get_steam_context",)
+    assert server.required_tools == ("get_player_summaries",)
+    assert server.candidate_read_only_tools == ()
     assert server.candidate_env == {"STEAM_BACKEND": "recording"}
-    assert source is not None
-    assert source.definition.mcp_server == "steam"
-    assert source.definition.fetch_tool == "get_steam_context"
     assert not data_root.exists()
+    assert root.topology_view().listeners == (
+        "serial:turn.context_prepared:steam",
+        "serial:runtime.started:steam",
+        "serial:runtime.stopping:steam",
+    )
     await root.dispose()
 
 
-def test_static_manifest_matches_module_and_recording_contract() -> None:
+def test_static_manifest_excludes_state_and_bounded_logs() -> None:
     manifest = load_static_plugin_manifest(ROOT)
 
     assert manifest.name == plugin.name == "steam"
-    assert manifest.version == plugin.version == "3.0.0"
+    assert manifest.version == plugin.version == "3.1.0"
     assert manifest.api_version == plugin.api_version == 3
     assert manifest.requirements == ("mcp/requirements.txt",)
-    assert manifest.exclude_data_paths == (
-        "steam_mcp_config.json",
-        "steam_user_cache.json",
-        "steam_app_cache.json",
-        "steam_proactive.sqlite3",
-        ".steam-v2-migration.json",
-    )
+    assert "steam_proactive.sqlite3" in manifest.exclude_data_paths
+    assert "steam_proactive.sqlite3-wal" in manifest.exclude_data_paths
+    assert "steam_context.runtime.log.3" in manifest.exclude_data_paths
+    assert "steam_mcp.runtime.log.3" in manifest.exclude_data_paths
     server = manifest.mcp_servers[0]
-    assert server.required_tools == ("get_steam_context",)
-    assert server.candidate_read_only_tools == ("get_steam_context",)
+    assert server.required_tools == ("get_player_summaries",)
+    assert server.candidate_read_only_tools == ()
     assert server.candidate_env == (("STEAM_BACKEND", "recording"),)
+
+
+def test_candidate_copy_excludes_formal_state_and_logs(tmp_path: Path) -> None:
+    manifest = load_static_plugin_manifest(ROOT)
+    source = tmp_path / "workspace" / "plugin-data" / "steam-builtin"
+    source.mkdir(parents=True)
+    for name in manifest.exclude_data_paths:
+        path = source / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"formal:{name}", encoding="utf-8")
+    (source / "candidate-visible.txt").write_text("visible", encoding="utf-8")
+    target = tmp_path / "validation" / "steam"
+
+    inventory = _copy_validation_data(
+        source,
+        target,
+        manifest.exclude_data_paths,
+    )
+
+    assert inventory == ("candidate-visible.txt",)
+    assert (target / "candidate-visible.txt").read_text() == "visible"
+    assert not any((target / name).exists() for name in manifest.exclude_data_paths)
