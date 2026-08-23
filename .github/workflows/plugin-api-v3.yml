@@ -55,6 +55,7 @@ jobs:
       - name: Verify Steam v3 composition and migration
         env:
           AKASHIC_AGENT_ROOT: .akashic-core
+          AKASHIC_PLUGIN_FIXTURE_PYTHON: ${{ github.workspace }}/mcp/.venv/bin/python
           PYTHONPATH: .akashic-core:mcp:mcp/.venv/lib/python3.13/site-packages
         run: mcp/.venv/bin/python -m pytest -q mcp/tests tests
       - name: Check changed v3 sources
