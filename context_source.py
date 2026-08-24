@@ -12,7 +12,7 @@ from agent.control.timer import TimerHandle, TimerStatus
 from agent.lifecycle.types import BeforeTurnCtx
 from agent.plugin_composition import HealthHandle, PluginTimers
 
-from steam_runtime import backend
+from .steam_runtime import backend
 
 
 class SteamContextRuntime:

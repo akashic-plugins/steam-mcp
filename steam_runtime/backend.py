@@ -12,7 +12,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
-from steam_runtime.config import SteamRuntimeConfig, load_runtime_config
+from .config import SteamRuntimeConfig, load_runtime_config
 
 
 _DB_NAME = "steam_proactive.sqlite3"

@@ -11,8 +11,8 @@ import pytest
 from agent.control.timer import TimerReceipt, TimerStatus
 from agent.lifecycle.types import BeforeTurnCtx
 from agent.plugin_composition import PluginTimers
-from context_source import SteamContextRuntime
-from steam_runtime import backend
+from steam_test_plugin.context_source import SteamContextRuntime  # pyright: ignore[reportMissingImports]
+from steam_test_plugin.steam_runtime import backend  # pyright: ignore[reportMissingImports]
 
 
 class _TimerHandle:

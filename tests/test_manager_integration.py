@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import shutil
 import sqlite3
-import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -71,8 +71,9 @@ async def _eventually(predicate) -> None:
 
 
 def _stage_plugin(tmp_path: Path) -> Path:
-    """复制真实 Steam 插件并复用当前测试解释器。"""
+    """复制真实 Steam 插件并链接调用方声明的 artifact 运行时。"""
 
+    runtime = Path(os.environ["AKASHIC_PLUGIN_FIXTURE_PYTHON"]).parent.parent
     source = tmp_path / "plugins" / "steam"
     shutil.copytree(
         ROOT,
@@ -87,9 +88,36 @@ def _stage_plugin(tmp_path: Path) -> Path:
             "tests",
         ),
     )
-    runtime = Path(sys.executable).parent.parent
     (source / "mcp" / ".venv").symlink_to(runtime, target_is_directory=True)
     return source
+
+
+def test_stage_plugin_links_declared_fixture_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = tmp_path / "artifact" / ".venv"
+    fixture_python = runtime / "bin" / "python"
+    fixture_python.parent.mkdir(parents=True)
+    fixture_python.touch()
+    monkeypatch.setenv("AKASHIC_PLUGIN_FIXTURE_PYTHON", str(fixture_python))
+
+    source = _stage_plugin(tmp_path)
+
+    assert (source / "mcp" / ".venv").readlink() == runtime
+
+
+def test_stage_plugin_requires_fixture_python(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AKASHIC_PLUGIN_FIXTURE_PYTHON", raising=False)
+
+    with pytest.raises(KeyError) as error:
+        _stage_plugin(tmp_path)
+
+    assert error.value.args == ("AKASHIC_PLUGIN_FIXTURE_PYTHON",)
+    assert not (tmp_path / "plugins").exists()
 
 
 def _config(data_root: Path) -> Path:
