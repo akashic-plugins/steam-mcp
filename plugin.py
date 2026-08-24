@@ -12,7 +12,7 @@ from agent.plugin_composition import (
     McpServerDefinition,
 )
 
-from context_source import SteamContextRuntime
+from .context_source import SteamContextRuntime
 
 
 class SteamConfig(BaseModel):

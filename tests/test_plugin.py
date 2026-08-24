@@ -4,8 +4,8 @@ import inspect
 from pathlib import Path
 from typing import cast
 
-import plugin
 import pytest
+from steam_test_plugin import plugin  # pyright: ignore[reportMissingImports]
 from agent.control.timer import OneShotTimer
 from agent.plugin_composition import (
     MCP_SERVERS,
