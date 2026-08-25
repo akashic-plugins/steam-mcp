@@ -13,7 +13,6 @@ from http_client import HttpClient
 mcp = FastMCP("steam-web-api")
 RUNTIME_DIR = Path(os.environ.get("AKA_PLUGIN_DATA_DIR", "").strip() or Path.cwd())
 RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-BACKEND = os.environ.get("STEAM_BACKEND", "formal").strip().lower()
 http_client = HttpClient(config_path=str(RUNTIME_DIR / "steam_mcp_config.json"))
 SUPPORTED_FORMATS = {"json", "xml", "vdf"}
 MAX_STEAM_IDS_PER_REQUEST = 100
@@ -623,42 +622,6 @@ def _convert_game_playtimes_to_hours(game: dict) -> None:
     for key, value in list(game.items()):
         if key.startswith("playtime_") and isinstance(value, int | float):
             game[key] = round(value / 60, 1)
-
-
-# ---------------------------------------------------------------------------
-# Proactive context tools
-# ---------------------------------------------------------------------------
-
-@mcp.tool()
-def get_steam_context() -> dict:
-    """获取用户 Steam 游戏活动的持久上下文，供 proactive engine 注入 background_context。
-    返回近两周游戏时长、历史对比、当前在线状态等结构化数据。
-    """
-    if BACKEND == "recording":
-        return {
-            "items": [
-                {
-                    "presence": "unknown",
-                    "interruptibility": 0.4,
-                    "confidence": 0.0,
-                    "transition": "",
-                    "recording": True,
-                }
-            ]
-        }
-    import steam_proactive
-
-    return {"items": [steam_proactive.get_context()]}
-
-
-@mcp.tool()
-def take_steam_snapshot() -> dict:
-    """拉取并存储一次 Steam 游戏数据快照。通常由定时任务调用，也可手动触发。"""
-    if BACKEND == "recording":
-        raise RuntimeError("recording backend 禁止写 Steam snapshot")
-    import steam_proactive
-
-    return steam_proactive.take_snapshot()
 
 
 if __name__ == "__main__":

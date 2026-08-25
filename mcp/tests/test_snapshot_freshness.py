@@ -1,114 +1,223 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import sqlite3
 from datetime import UTC, datetime, timedelta
 
-import steam_proactive
+import pytest
+
+from steam_runtime import backend
 
 
-def _configure(monkeypatch, tmp_path, now: datetime) -> None:
-    monkeypatch.setattr(steam_proactive, "_DB_PATH", tmp_path / "steam.sqlite3")
-    monkeypatch.setattr(steam_proactive, "_CONFIG_PATH", tmp_path / "steam.json")
-    monkeypatch.setattr(steam_proactive, "_now", lambda: now)
-    (tmp_path / "steam.json").write_text(
+def _config(tmp_path) -> None:
+    (tmp_path / "steam_mcp_config.json").write_text(
         json.dumps(
             {
                 "steam_api_key": "test-key",
                 "steam_id": "test-user",
-                "snapshot_interval_seconds": 3600,
+                "snapshot_interval_seconds": 300,
             }
         ),
         encoding="utf-8",
     )
 
 
-def test_context_refreshes_expired_snapshot_once(monkeypatch, tmp_path) -> None:
-    now = datetime(2026, 7, 13, tzinfo=UTC)
-    _configure(monkeypatch, tmp_path, now)
-    recent_calls = 0
-
-    def recently_played(_: str) -> list[dict]:
-        nonlocal recent_calls
-        recent_calls += 1
-        return [
-            {
-                "appid": 1,
-                "name": "Game",
-                "playtime_2weeks": 120,
-                "playtime_forever": 600,
-            }
-        ]
-
-    monkeypatch.setattr(steam_proactive, "_fetch_recently_played", recently_played)
+def test_changed_snapshot_appends_but_same_and_empty_only_advance_current_state(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    now = datetime(2026, 8, 23, 8, tzinfo=UTC)
+    _config(tmp_path)
+    games = [
+        {
+            "appid": 1,
+            "name": "Game",
+            "playtime_2weeks": 120,
+            "playtime_forever": 600,
+        }
+    ]
     monkeypatch.setattr(
-        steam_proactive,
+        backend,
         "_fetch_player_summary",
         lambda _: {"personastate": 1},
     )
+    monkeypatch.setattr(backend, "_fetch_recently_played", lambda _: games)
 
-    first = steam_proactive.get_context()
-    second = steam_proactive.get_context()
+    first = backend.refresh(tmp_path, now)
+    repeated = backend.refresh(tmp_path, now + timedelta(minutes=5))
+    monkeypatch.setattr(backend, "_fetch_recently_played", lambda _: [])
+    empty = backend.refresh(tmp_path, now + timedelta(minutes=10))
+    current = backend.state(tmp_path, now + timedelta(minutes=10))
 
-    assert recent_calls == 1
-    assert first["recent_snapshot_at"] == now.isoformat()
-    assert first["games"][0]["recent_2w_hours"] == 2.0
-    assert second["snapshot_refresh_error"] is None
-
-
-def test_empty_snapshot_records_fresh_run(monkeypatch, tmp_path) -> None:
-    now = datetime(2026, 7, 13, tzinfo=UTC)
-    _configure(monkeypatch, tmp_path, now)
-    calls = 0
-
-    def recently_played(_: str) -> list[dict]:
-        nonlocal calls
-        calls += 1
-        return []
-
-    monkeypatch.setattr(steam_proactive, "_fetch_recently_played", recently_played)
-    monkeypatch.setattr(steam_proactive, "_fetch_player_summary", lambda _: {})
-
-    context = steam_proactive.get_context()
-    _ = steam_proactive.get_context()
-
-    assert calls == 1
-    assert context["available"] is True
-    assert context["games"] == []
+    assert first.history_appended is True
+    assert repeated.history_appended is False
+    assert empty.history_appended is False
+    assert current["snapshot_runs"] == 1
+    assert current["snapshots"] == 1
+    assert json.loads(str(current["current_games_json"])) == []
 
 
-def test_snapshot_refresh_failure_is_visible(monkeypatch, tmp_path) -> None:
-    now = datetime(2026, 7, 13, tzinfo=UTC)
-    _configure(monkeypatch, tmp_path, now)
+def test_existing_history_is_never_trimmed(tmp_path, monkeypatch) -> None:
+    now = datetime(2026, 8, 23, 8, tzinfo=UTC)
+    _config(tmp_path)
     monkeypatch.setattr(
-        steam_proactive,
-        "_fetch_recently_played",
-        lambda _: (_ for _ in ()).throw(OSError("Steam unavailable")),
+        backend,
+        "_fetch_player_summary",
+        lambda _: {"personastate": 1},
     )
-    monkeypatch.setattr(steam_proactive, "_fetch_player_summary", lambda _: {})
+    games = [
+        {
+            "appid": 1,
+            "name": "Game",
+            "playtime_2weeks": 60,
+            "playtime_forever": 60,
+        }
+    ]
+    monkeypatch.setattr(backend, "_fetch_recently_played", lambda _: games)
+    for index in range(4):
+        games[0] = {**games[0], "playtime_forever": 60 + index}
+        _ = backend.refresh(tmp_path, now + timedelta(minutes=5 * index))
 
-    context = steam_proactive.get_context()
+    current = backend.state(tmp_path, now + timedelta(minutes=20))
+    assert current["snapshot_runs"] == 4
+    assert current["snapshots"] == 4
 
-    assert context["available"] is False
-    assert context["snapshot_refresh_error"] == "Steam unavailable"
+
+def test_initialize_adopts_existing_history_without_rewriting_it(tmp_path) -> None:
+    database = tmp_path / "steam_proactive.sqlite3"
+    existing = [
+        ("2026-07-01T08:00:00+00:00", 1, "Old Game", 120, 600),
+        ("2026-08-01T08:00:00+00:00", 1, "Old Game", 60, 660),
+    ]
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshotted_at TEXT NOT NULL,
+                game_appid INTEGER NOT NULL,
+                game_name TEXT NOT NULL,
+                playtime_2w_mins INTEGER NOT NULL,
+                playtime_forever_mins INTEGER NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "CREATE TABLE snapshot_runs (snapshotted_at TEXT PRIMARY KEY)"
+        )
+        connection.executemany(
+            """
+            INSERT INTO snapshots(
+                snapshotted_at, game_appid, game_name,
+                playtime_2w_mins, playtime_forever_mins
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            existing,
+        )
+        connection.executemany(
+            "INSERT INTO snapshot_runs(snapshotted_at) VALUES (?)",
+            [(row[0],) for row in existing],
+        )
+        connection.commit()
+
+    backend.initialize(tmp_path, datetime(2026, 8, 23, tzinfo=UTC))
+
+    with sqlite3.connect(database) as connection:
+        adopted = connection.execute(
+            """
+            SELECT snapshotted_at, game_appid, game_name,
+                   playtime_2w_mins, playtime_forever_mins
+            FROM snapshots ORDER BY id
+            """
+        ).fetchall()
+        runs = connection.execute(
+            "SELECT snapshotted_at FROM snapshot_runs ORDER BY snapshotted_at"
+        ).fetchall()
+    assert adopted == existing
+    assert runs == [(row[0],) for row in existing]
 
 
-def test_recent_snapshot_skips_refresh(monkeypatch, tmp_path) -> None:
-    now = datetime(2026, 7, 13, tzinfo=UTC)
-    _configure(monkeypatch, tmp_path, now)
-    conn = steam_proactive._get_conn()
-    conn.execute(
-        "INSERT INTO snapshot_runs(snapshotted_at) VALUES (?)",
-        ((now - timedelta(minutes=30)).isoformat(),),
-    )
-    conn.commit()
-    conn.close()
-    monkeypatch.setattr(
-        steam_proactive,
-        "_fetch_recently_played",
-        lambda _: (_ for _ in ()).throw(AssertionError("不应刷新")),
-    )
-    monkeypatch.setattr(steam_proactive, "_fetch_player_summary", lambda _: {})
+def test_legacy_schema_install_rolls_back_and_can_be_retried(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    database = tmp_path / "steam_proactive.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshotted_at TEXT NOT NULL,
+                game_appid INTEGER NOT NULL,
+                game_name TEXT NOT NULL,
+                playtime_2w_mins INTEGER NOT NULL,
+                playtime_forever_mins INTEGER NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO snapshots(
+                snapshotted_at, game_appid, game_name,
+                playtime_2w_mins, playtime_forever_mins
+            ) VALUES ('2026-08-01T08:00:00+00:00', 1, 'Old Game', 60, 600)
+            """
+        )
+        connection.commit()
+    before = database.read_bytes()
 
-    context = steam_proactive.get_context()
+    def interrupted(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            "CREATE TABLE snapshot_runs (snapshotted_at TEXT PRIMARY KEY)"
+        )
+        raise RuntimeError("fixture interrupted migration")
 
-    assert context["snapshot_refresh_error"] is None
+    original = backend._install_schema
+    monkeypatch.setattr(backend, "_install_schema", interrupted)
+    with pytest.raises(RuntimeError, match="interrupted migration"):
+        backend.initialize(tmp_path, datetime(2026, 8, 23, tzinfo=UTC))
+
+    assert database.read_bytes() == before
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name"
+        ).fetchall() == [("snapshots",), ("sqlite_sequence",)]
+        assert connection.execute(
+            "SELECT game_name, playtime_forever_mins FROM snapshots"
+        ).fetchall() == [("Old Game", 600)]
+
+    monkeypatch.setattr(backend, "_install_schema", original)
+    backend.initialize(tmp_path, datetime(2026, 8, 23, tzinfo=UTC))
+    backend.initialize(tmp_path, datetime(2026, 8, 23, tzinfo=UTC))
+    current = backend.state(tmp_path, datetime(2026, 8, 23, tzinfo=UTC))
+    assert current["snapshot_runs"] == 1
+    assert current["snapshots"] == 1
+
+
+def test_incompatible_history_schema_fails_loud(tmp_path) -> None:
+    database = tmp_path / "steam_proactive.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE snapshots(value TEXT NOT NULL)")
+        connection.execute("INSERT INTO snapshots(value) VALUES ('keep-me')")
+        connection.commit()
+    before_bytes = database.read_bytes()
+    before_hash = hashlib.sha256(before_bytes).hexdigest()
+    before_sidecars = sorted(path.name for path in tmp_path.iterdir())
+
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="schema 不兼容"):
+            backend.initialize(tmp_path, datetime(2026, 8, 23, tzinfo=UTC))
+
+    assert database.read_bytes() == before_bytes
+    assert hashlib.sha256(database.read_bytes()).hexdigest() == before_hash
+    assert sorted(path.name for path in tmp_path.iterdir()) == before_sidecars
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT name, sql FROM sqlite_schema WHERE type = 'table'"
+        ).fetchall() == [
+            ("snapshots", "CREATE TABLE snapshots(value TEXT NOT NULL)")
+        ]
+        assert connection.execute("SELECT value FROM snapshots").fetchall() == [
+            ("keep-me",)
+        ]

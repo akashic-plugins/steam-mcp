@@ -1,36 +1,41 @@
 # steam-mcp
 
-Akashic Steam plugin. It bundles:
-
-- `steam` MCP server
-- `steam-inventory-analyzer` skill
-
-## Install
-
-```bash
-python main.py plugin-install --source https://github.com/akashic-plugins/steam-mcp --marketplace github
-```
-
-Restart Akashic after install.
-
-## Data directory
-
-Runtime data lives in:
+Steam 是 Akashic Plugin API v3 插件。它用现有普通原语组合 current context：
 
 ```text
-<workspace>/plugin-data/steam-<marketplace>/
+Core Timer ──触发──> Steam shared domain ──覆盖──> current presence
+                              │
+                              └──有意义变化──追加──> game snapshot history
+
+Wake BeforeTurn ──只读 fresh state──> extra_hints
+Passive BeforeTurn ──────────────────> 不变
+用户 Turn ──调用 Steam MCP───────────> 主动查询 Steam API
 ```
 
-Common files:
+## 能力与 owner
 
-- `steam_mcp_config.json`
-- `steam_user_cache.json`
-- `steam_app_cache.json`
-- `steam_proactive.sqlite3`
+- `MCP_SERVERS`：保留用户主动查询工具。MCP 不再包含 context fetch 或手动
+  snapshot 特权工具。
+- `TIMERS`：正式稳定 Root 独占一个 one-shot Timer。presence 每 5 分钟刷新；
+  网络瞬时失败记录结构化 Incident，并在 60 秒后重试。
+- `turn.context_prepared`：只在 `channel=wake` 且 current presence 仍 fresh 时
+  append 一个普通 hint；不会 abort、替换 prompt 或影响 passive Turn。
 
-## Config
+Steam SQLite 是唯一 domain state owner：
 
-Create `steam_mcp_config.json` in the plugin data directory:
+- `current_state` 是可覆盖 singleton，保存 current presence、当前游戏列表、刷新
+  deadline 和最近错误。
+- `snapshots`、`snapshot_runs` 保存真实游戏快照历史，不自动裁切。相同快照或空
+  结果只推进 current check time，不制造历史。
+- 旧文件名 `steam_proactive.sqlite3` 为了原位继承正式历史而保留；运行代码、表
+  owner 和插件能力已经不依赖旧主动系统。
+
+纯诊断日志固定为 5 MiB、最多 3 个备份。candidate 只在自己的隔离目录完成 MCP
+readiness/handshake：不注册 Timer、不访问 Steam 外网、不读取或写入正式 state。
+
+## 配置
+
+在插件 data root 创建 `steam_mcp_config.json`：
 
 ```json
 {
@@ -40,25 +45,18 @@ Create `steam_mcp_config.json` in the plugin data directory:
 }
 ```
 
-`get_steam_context` 每次读取实时在线状态，并在历史游戏时长快照超过
-`snapshot_interval_seconds` 时自动刷新。空的最近游玩列表也会记录快照批次，避免重复刷新。
+`snapshot_interval_seconds` 只控制游戏历史快照检查；presence 使用固定 5 分钟
+freshness，避免把历史采样频率和当前状态时效揉成一个概念。
 
 ## v2 data migration
 
-v3 不会在插件加载时隐式复制正式数据。停止 Akashic 后显式执行：
+显式迁移仍使用 `scripts/migrate_v2_data.py`。它保留 `mcp/steam-mcp` 原文件，
+通过 SQLite backup、integrity check 和 hash receipt 发布到
+`plugin-data/steam-<marketplace>/`，不删除历史源。
 
-```bash
-PYTHONPATH=/path/to/akashic-agent \
-python scripts/migrate_v2_data.py \
-  --workspace /path/to/workspace \
-  --marketplace github
-```
+## 验证
 
-迁移保留 `mcp/steam-mcp` 原文件，在
-`plugin-data/steam-<marketplace>/.steam-v2-migration.json` 写入 hash 与 SQLite
-完整性证据。进程内失败会回滚本次新增文件；进程崩溃后重跑会清理 staging，
-并只接纳已经发布且内容完全相同的文件。
-
-候选验证使用无凭证、无外网、无数据库的 recording backend；正式 MCP
-只从自己的 `plugin-data` 读取 `steam_mcp_config.json`，不读取 ambient
-`STEAM_API_KEY` 或 `STEAM_ID`。
+CI 固定 Core `9da3a988a2bf62b0f550bd4f6bb98c4eeb1f56f5`。测试覆盖真实
+PluginManager + stdio MCP + Timer、candidate 零正式 write set、reload Timer
+换班、网络失败恢复、fresh/stale/unknown、Wake/passive 分流、历史保留、日志轮转、
+pyright、compileall、Plugin API contract 和 `git diff --check`。

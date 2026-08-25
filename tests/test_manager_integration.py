@@ -1,98 +1,129 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
 import shutil
-import sys
+import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from agent.plugins.artifacts import ArtifactPointer, write_pointers
-from agent.plugins.generation_activity_host import ActivityHost
-from agent.plugins.generation_proactive_host import ProactiveActivityAdapter
-from agent.plugins.manifest import write_plugin_manifest
+import agent.plugins.manager as plugin_manager_module
+from agent.control.timer import TimerReceipt, TimerStatus
+from agent.lifecycle.composition import CONTEXT_PREPARED_EVENT
+from agent.lifecycle.types import BeforeTurnCtx
 from agent.plugins.manager import PluginManager
 from bus.event_bus import EventBus
+
+from steam_runtime import backend
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _stage_installed_plugin(tmp_path: Path) -> Path:
-    """为 installed candidate 测试准备 stable/latest 两个 immutable artifact。"""
-
-    # 1. 复制完整插件 artifact，复用当前测试解释器作为隔离 MCP runtime。
-    plugin_base = tmp_path / "home" / "cache" / "github" / "steam"
-    artifacts = plugin_base / ".artifacts"
-    runtime = Path(sys.executable).parent.parent
-    for label in ("stable", "candidate"):
-        artifact = artifacts / label
-        shutil.copytree(
-            ROOT,
-            artifact,
-            ignore=shutil.ignore_patterns(
-                ".git",
-                ".akashic-core",
-                ".pytest_cache",
-                "__pycache__",
-                ".venv",
-            ),
+class _TimerHandle:
+    def __init__(self, timer_id: str, deadline: datetime, now: datetime) -> None:
+        self._id = timer_id
+        self.deadline = deadline
+        self.now = now
+        self.future: asyncio.Future[TimerReceipt] = (
+            asyncio.get_running_loop().create_future()
         )
-        (artifact / "mcp" / ".venv").symlink_to(runtime, target_is_directory=True)
-        if label == "candidate":
-            (artifact / ".candidate-marker").write_text("candidate\n", encoding="utf-8")
 
-    # 2. stable 与 latest 指向不同 artifact，显式打开 installed 插件。
-    write_pointers(
-        plugin_base,
-        stable=ArtifactPointer(".artifacts/stable"),
-        latest=ArtifactPointer(".artifacts/stable"),
-    )
-    write_plugin_manifest(
-        {"steam@github": True},
-        plugins_home=tmp_path / "home",
-    )
-    return plugin_base
+    @property
+    def id(self) -> str:
+        return self._id
+
+    async def result(self) -> TimerReceipt:
+        return await asyncio.shield(self.future)
+
+    async def cancel(self) -> TimerReceipt:
+        if not self.future.done():
+            self.future.set_result(self._receipt(TimerStatus.CANCELLED))
+        return await self.future
+
+    async def cleanup(self) -> None:
+        _ = await self.cancel()
+
+    def _receipt(self, status: TimerStatus) -> TimerReceipt:
+        return TimerReceipt(self.id, self.deadline, self.now, status)
+
+
+class _Timer:
+    def __init__(self, now: datetime) -> None:
+        self.now = now
+        self.handles: list[_TimerHandle] = []
+
+    def schedule(self, deadline: datetime) -> _TimerHandle:
+        handle = _TimerHandle(f"timer:{len(self.handles)}", deadline, self.now)
+        self.handles.append(handle)
+        return handle
+
+
+async def _eventually(predicate) -> None:
+    for _ in range(300):
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("condition did not settle")
 
 
 def _stage_plugin(tmp_path: Path) -> Path:
-    """复制可执行插件，并复用当前测试解释器的依赖环境。"""
+    """复制真实 Steam 插件并链接调用方声明的 artifact 运行时。"""
 
+    runtime = Path(os.environ["AKASHIC_PLUGIN_FIXTURE_PYTHON"]).parent.parent
     source = tmp_path / "plugins" / "steam"
-    source.mkdir(parents=True)
-    for relative in (
-        "plugin.py",
-        "akashic.plugin.toml",
-        "mcp/requirements.txt",
-        "mcp/run_mcp.py",
-        "mcp/runtime_config.py",
-        "mcp/steam_mcp.py",
-        "mcp/steam_proactive.py",
-        "mcp/http_client.py",
-    ):
-        target = source / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(ROOT / relative, target)
-    shutil.copytree(ROOT / "skills", source / "skills")
-    runtime = Path(sys.executable).parent.parent
+    shutil.copytree(
+        ROOT,
+        source,
+        ignore=shutil.ignore_patterns(
+            ".git",
+            ".akashic-core",
+            ".plugin-contracts",
+            ".pytest_cache",
+            ".venv",
+            "__pycache__",
+            "tests",
+        ),
+    )
     (source / "mcp" / ".venv").symlink_to(runtime, target_is_directory=True)
     return source
 
 
-@pytest.mark.asyncio
-async def test_manager_boots_formal_steam_without_network_calls_and_drains(
+def test_stage_plugin_links_declared_fixture_runtime(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """启动真实 stdio handshake，并证明 formal data 与 runtime 精确回收。"""
+    runtime = tmp_path / "artifact" / ".venv"
+    fixture_python = runtime / "bin" / "python"
+    fixture_python.parent.mkdir(parents=True)
+    fixture_python.touch()
+    monkeypatch.setenv("AKASHIC_PLUGIN_FIXTURE_PYTHON", str(fixture_python))
 
-    # 1. 只提供测试专用 formal 配置；测试不调用任何 Steam tool
-    plugin_root = _stage_plugin(tmp_path)
-    workspace = tmp_path / "workspace"
-    data_root = workspace / "plugin-data" / "steam-builtin"
-    data_root.mkdir(parents=True)
-    config = data_root / "steam_mcp_config.json"
-    config.write_text(
+    source = _stage_plugin(tmp_path)
+
+    assert (source / "mcp" / ".venv").readlink() == runtime
+
+
+def test_stage_plugin_requires_fixture_python(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AKASHIC_PLUGIN_FIXTURE_PYTHON", raising=False)
+
+    with pytest.raises(KeyError) as error:
+        _stage_plugin(tmp_path)
+
+    assert error.value.args == ("AKASHIC_PLUGIN_FIXTURE_PYTHON",)
+    assert not (tmp_path / "plugins").exists()
+
+
+def _config(data_root: Path) -> Path:
+    data_root.mkdir(parents=True, exist_ok=True)
+    path = data_root / "steam_mcp_config.json"
+    path.write_text(
         json.dumps(
             {
                 "steam_api_key": "test-only",
@@ -102,9 +133,73 @@ async def test_manager_boots_formal_steam_without_network_calls_and_drains(
         ),
         encoding="utf-8",
     )
-    config_digest = hashlib.sha256(config.read_bytes()).hexdigest()
+    return path
 
-    # 2. 走真实 Manager/Host formal publication，只观察 tools/list
+
+def _seed_fresh_state(data_root: Path, now: datetime) -> None:
+    backend.initialize(data_root, now)
+    database = data_root / "steam_proactive.sqlite3"
+    presence = {
+        "observed_at": now.isoformat(),
+        "online_status": "online",
+        "presence": "active",
+        "currently_playing": None,
+        "interruptibility": 0.8,
+        "confidence": 0.9,
+        "transition": "",
+    }
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            UPDATE current_state
+            SET presence_json = ?, presence_observed_at = ?,
+                presence_expires_at = ?, current_games_json = '[]'
+            WHERE singleton = 1
+            """,
+            (
+                json.dumps(presence, sort_keys=True, separators=(",", ":")),
+                now.isoformat(),
+                datetime(2026, 8, 23, 8, 5, tzinfo=UTC).isoformat(),
+            ),
+        )
+        connection.commit()
+
+
+def _ctx(now: datetime, channel: str) -> BeforeTurnCtx:
+    return BeforeTurnCtx(
+        session_key="session",
+        channel=channel,
+        chat_id="chat",
+        content="hello",
+        timestamp=now,
+        retrieved_memory_block="",
+        retrieval_trace_raw=None,
+        history_messages=(),
+        turn_id="turn:1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_manager_candidate_context_and_timer_handoff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """验证真实 MCP、Wake hint、静默 candidate 与 Timer 换班。"""
+
+    now = datetime(2026, 8, 23, 8, tzinfo=UTC)
+    timers: list[_Timer] = []
+
+    def timer_factory() -> _Timer:
+        timer = _Timer(now)
+        timers.append(timer)
+        return timer
+
+    monkeypatch.setattr(plugin_manager_module, "AsyncioOneShotTimer", timer_factory)
+    plugin_root = _stage_plugin(tmp_path)
+    workspace = tmp_path / "workspace"
+    data_root = workspace / "plugin-data" / "steam-builtin"
+    config = _config(data_root)
+    _seed_fresh_state(data_root, now)
     manager = PluginManager(
         plugin_dirs=[plugin_root.parent],
         event_bus=EventBus(),
@@ -112,139 +207,69 @@ async def test_manager_boots_formal_steam_without_network_calls_and_drains(
         workspace=workspace,
         installed_cache_root=tmp_path / "cache",
     )
-    adapter = ProactiveActivityAdapter(manager.composition_generation_host)
-    activity = ActivityHost((adapter,))
-    manager.bind_activity_host(activity)
-    snapshot = None
-    generation_id = None
-    route = None
-    try:
-        await manager.load_all()
-        snapshot = manager.current_snapshot
-        assert snapshot is not None and snapshot.mcp_server_registry is not None
-        assert tuple(snapshot.mcp_server_registry) == ("steam",)
-        generation = next(iter(snapshot.generations.values()))
-        generation_id = generation.generation_id
-        runtime = manager.composition_generation_host.get(generation_id)
-        assert runtime is not None and runtime.mode == "formal"
-        assert runtime.mcp is not None and runtime.mcp.state == "ready"
-        server = runtime.mcp.server("steam")
-        route = server.route()
-        assert route.mode == "formal"
-        assert "get_steam_context" in route.tool_names
-        assert "take_steam_snapshot" in route.tool_names
-        logs = list(server.logs().stdout) + list(server.logs().stderr)
-        assert not any("CallToolRequest" in line or '"tools/call"' in line for line in logs)
-        assert adapter.source_fetch_invocations == 0
-        assert hashlib.sha256(config.read_bytes()).hexdigest() == config_digest
-    finally:
-        if route is not None:
-            await route.aclose()
-        await manager.terminate_all()
-
-    # 3. terminate 后 exact generation、Activity、Root effects 全部释放
-    assert activity.active is None
-    assert manager.composition_generation_host.get(generation_id) is None
+    await manager.load_all()
+    snapshot = manager.current_snapshot
     assert snapshot is not None and snapshot.composition_root is not None
-    assert snapshot.composition_root.receipt().effects == ()
-    assert snapshot.composition_root.topology_view().listeners == ()
-
-
-@pytest.mark.asyncio
-async def test_manager_candidate_publish_switches_formal_steam_and_cleans_validation(
-    tmp_path: Path,
-) -> None:
-    """验证 installed Steam candidate 能 formalize、promote 并清理隔离资源。"""
-
-    # 1. 准备 stable formal 配置与 latest candidate artifact。
-    plugin_base = _stage_installed_plugin(tmp_path)
-    workspace = tmp_path / "workspace"
-    data_root = workspace / "plugin-data" / "steam-github"
-    data_root.mkdir(parents=True)
-    (data_root / "steam_mcp_config.json").write_text(
-        json.dumps(
-            {
-                "steam_api_key": "test-only",
-                "steam_id": "76561198000000000",
-                "snapshot_interval_seconds": 3600,
-            }
-        ),
-        encoding="utf-8",
+    runtime = manager.composition_generation_host.get(
+        snapshot.generations["steam"].generation_id
     )
-    manager = PluginManager(
-        plugin_dirs=[tmp_path / "builtin-plugins"],
-        event_bus=EventBus(),
-        tool_registry=None,
-        workspace=workspace,
-        installed_cache_root=plugin_base.parent.parent,
-    )
-    adapter = ProactiveActivityAdapter(manager.composition_generation_host)
-    activity = ActivityHost((adapter,))
-    manager.bind_activity_host(activity)
-    stable_snapshot = None
-    candidate = None
+    assert runtime is not None and runtime.mcp is not None
+    assert "get_player_summaries" in runtime.mcp.server("steam").tool_names
+    lifecycle = asyncio.create_task(manager.run_runtime_services())
     try:
-        # 2. 先启动 stable formal runtime，再走 candidate -> latest_ready。
-        await manager.load_all()
-        stable_snapshot = manager.current_snapshot
-        assert stable_snapshot is not None
-        stable_root = stable_snapshot.composition_root
-        assert stable_root is not None
-        assert stable_snapshot.proactive_component_catalog is not None
-        assert (
-            stable_snapshot.proactive_component_catalog.root_instance_token
-            is stable_root.instance_token
+        # 1. 稳定 Root 只注册一个 Timer；listener 不影响 passive。
+        await _eventually(lambda: sum(len(timer.handles) for timer in timers) == 1)
+        formal_timer = next(timer for timer in timers if timer.handles)
+        passive = _ctx(now, "passive")
+        wake = _ctx(now, "wake")
+        _ = await snapshot.composition_root.context.serial(
+            CONTEXT_PREPARED_EVENT,
+            passive,
         )
-        write_pointers(
-            plugin_base,
-            stable=ArtifactPointer(".artifacts/stable"),
-            latest=ArtifactPointer(".artifacts/candidate"),
+        _ = await snapshot.composition_root.context.serial(
+            CONTEXT_PREPARED_EVENT,
+            wake,
         )
-        candidate = await manager.prepare_candidate("steam@github")
+        assert passive.extra_hints == []
+        assert len(wake.extra_hints) == 1
+
+        # 2. candidate 可握手，但没有 Timer、外网或正式 write set。
+        database = data_root / "steam_proactive.sqlite3"
+        formal_hashes = {
+            "config": hashlib.sha256(config.read_bytes()).hexdigest(),
+            "database": hashlib.sha256(database.read_bytes()).hexdigest(),
+        }
+        with (plugin_root / "plugin.py").open("a", encoding="utf-8") as handle:
+            handle.write("\n# candidate fixture revision\n")
+        candidate = await manager.prepare_candidate("steam")
         assert candidate is not None and candidate.runtime_snapshot is not None
-        assert candidate.validation_workspace is not None
+        assert sum(len(timer.handles) for timer in timers) == 1
         candidate_root = candidate.runtime_snapshot.composition_root
         assert candidate_root is not None
-        assert candidate.runtime_snapshot.proactive_component_catalog is not None
-        assert (
-            candidate.runtime_snapshot.proactive_component_catalog.root_instance_token
-            is candidate_root.instance_token
+        candidate_wake = _ctx(now, "wake")
+        _ = await candidate_root.context.serial(
+            CONTEXT_PREPARED_EVENT,
+            candidate_wake,
         )
+        assert candidate_wake.extra_hints == []
+        assert hashlib.sha256(config.read_bytes()).hexdigest() == formal_hashes["config"]
+        assert hashlib.sha256(database.read_bytes()).hexdigest() == formal_hashes["database"]
 
-        # 3. publish 重新 formalize 到最终 Root，再 promote 并观察验证目录清理。
-        ready_result = await manager.publish_prepared("steam@github")
-        assert ready_result["publication_state"] == "latest_ready"
-        ready = manager.ready_candidate
-        assert ready is not None
-        assert ready is candidate
-        ready_snapshot = ready.runtime_snapshot
-        assert ready_snapshot is not None and ready_snapshot.composition_root is not None
-        assert ready_snapshot.proactive_component_catalog is not None
-        assert (
-            ready_snapshot.proactive_component_catalog.root_instance_token
-            is ready_snapshot.composition_root.instance_token
-        )
-        validation_root = candidate.validation_workspace.parent
-        assert validation_root.exists()
-
-        promoted = await manager.switch_ready("steam@github")
-        assert promoted["publication_state"] == "promoted"
-        final_snapshot = manager.current_snapshot
-        assert final_snapshot is not None and final_snapshot.composition_root is not None
-        assert final_snapshot.proactive_component_catalog is not None
-        assert (
-            final_snapshot.proactive_component_catalog.root_instance_token
-            is final_snapshot.composition_root.instance_token
-        )
-        assert not validation_root.exists()
-        assert manager.ready_candidate is None
-        assert json.loads((plugin_base / ".pointers.json").read_text()) == {
-            "latest": ".artifacts/candidate",
-            "stable": ".artifacts/candidate",
-        }
+        # 3. 发布先取消旧 Timer，再由新稳定 Root 注册一个 Timer。
+        result = await manager.publish_prepared("steam")
+        assert result["publication_state"] == "committed"
+        await _eventually(lambda: sum(len(timer.handles) for timer in timers) == 2)
+        assert (await formal_timer.handles[0].result()).status is TimerStatus.CANCELLED
+        active = [
+            handle
+            for timer in timers
+            for handle in timer.handles
+            if not handle.future.done()
+        ]
+        assert len(active) == 1
     finally:
+        lifecycle.cancel()
+        _ = await asyncio.gather(lifecycle, return_exceptions=True)
         await manager.terminate_all()
 
-    assert candidate is not None
-    assert activity.active is None
-    assert manager.composition_generation_host.get(candidate.generation_id) is None
+    assert all(handle.future.done() for timer in timers for handle in timer.handles)

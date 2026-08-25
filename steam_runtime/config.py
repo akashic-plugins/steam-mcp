@@ -15,7 +15,7 @@ class SteamRuntimeConfig:
 def load_runtime_config(path: Path) -> SteamRuntimeConfig:
     """读取并校验 formal Steam runtime 配置。"""
 
-    # 1. 配置只来自 formal plugin-data，不接受 ambient secret
+    # 1. 配置只来自 formal plugin-data，不接受 ambient secret。
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as error:
@@ -25,7 +25,7 @@ def load_runtime_config(path: Path) -> SteamRuntimeConfig:
     if not isinstance(raw, dict):
         raise RuntimeError("steam_mcp_config.json 根节点必须是 object")
 
-    # 2. 启动前建立完整 credential 与用户身份不变量
+    # 2. 在配置边界建立 credential、用户身份和刷新间隔不变量。
     api_key = raw.get("steam_api_key")
     steam_id = raw.get("steam_id")
     if not isinstance(api_key, str) or not api_key.strip():
