@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -9,14 +8,14 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from agent.control.timer import TimerHandle, TimerStatus
-from agent.lifecycle.types import BeforeTurnCtx
 from agent.plugin_composition import HealthHandle, PluginTimers
+from plugins.wake.contracts import WakeContextSource
 
 from .steam_runtime import backend
 
 
 class SteamContextRuntime:
-    """用 Timer 刷新 Steam current state，并只为 Wake 追加 fresh hint。"""
+    """用 Timer 刷新 Steam current state，并上报可过期 Context。"""
 
     def __init__(
         self,
@@ -24,6 +23,7 @@ class SteamContextRuntime:
         timers: PluginTimers,
         health: HealthHandle,
         report_incident: Callable[[str, str], object],
+        context: WakeContextSource,
         *,
         now: Callable[[], datetime] | None = None,
     ) -> None:
@@ -31,6 +31,7 @@ class SteamContextRuntime:
         self._timers = timers
         self._health = health
         self._report_incident = report_incident
+        self._context = context
         self._now = now or (lambda: datetime.now(UTC))
         self._handle: TimerHandle | None = None
         self._task: asyncio.Task[None] | None = None
@@ -50,6 +51,7 @@ class SteamContextRuntime:
         now = self._aware_now()
         await asyncio.to_thread(backend.initialize, self._data_root, now)
         deadline = await asyncio.to_thread(backend.next_deadline, self._data_root, now)
+        await asyncio.to_thread(self._report_current, now)
         self._arm(deadline)
 
     async def close(self) -> None:
@@ -69,19 +71,6 @@ class SteamContextRuntime:
         if handle is not None:
             await handle.cleanup()
         self._stop_diagnostics()
-
-    def prepare(self, ctx: BeforeTurnCtx) -> None:
-        """只在 Wake channel 读取 fresh state 并追加一个普通 hint。"""
-
-        if ctx.channel != "wake":
-            return
-        current = backend.wake_context(self._data_root, ctx.timestamp)
-        if current is None:
-            return
-        ctx.extra_hints.append(
-            "Steam current context:\n"
-            + json.dumps(current, sort_keys=True, separators=(",", ":"))
-        )
 
     def _arm(self, deadline: datetime) -> None:
         if self._closed or self._handle is not None:
@@ -131,6 +120,7 @@ class SteamContextRuntime:
             else:
                 self._health.recover()
                 next_due = result.next_due
+                await asyncio.to_thread(self._report_current, now)
                 self._log.info(
                     "refresh committed presence=%s history_appended=%s next_due=%s",
                     result.presence,
@@ -143,6 +133,20 @@ class SteamContextRuntime:
             await handle.cleanup()
         if not self._closed and next_due is not None:
             self._arm(next_due)
+
+    def _report_current(self, now: datetime) -> None:
+        current = backend.wake_context(self._data_root, now)
+        if current is None:
+            return
+        observed_at = datetime.fromisoformat(str(current["observed_at"]))
+        expires_at = datetime.fromisoformat(str(current["expires_at"]))
+        _ = self._context.report(
+            source_id="steam-presence",
+            event_id="current",
+            payload=current,
+            observed_at=observed_at,
+            expires_at=expires_at,
+        )
 
     def _aware_now(self) -> datetime:
         value = self._now()

@@ -21,6 +21,7 @@ from agent.plugin_composition.mcp_slots import (
 from agent.plugins.composable import ComposablePlugin
 from agent.plugins.manager import _copy_validation_data
 from agent.plugins.static_manifest import load_static_plugin_manifest
+from plugins.wake.contracts import WAKE_CONTEXT_SOURCE
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,7 +30,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_pure_v3_exports_and_exact_apply() -> None:
     assert plugin.api_version == 3
     assert plugin.name == "steam"
-    assert plugin.version == "3.1.0"
+    assert plugin.version == "3.2.0"
     assert plugin.skill_roots == ("skills",)
     assert tuple(inspect.signature(plugin.apply).parameters) == ("ctx", "config")
     assert ComposablePlugin.from_module(plugin).skill_roots == ("skills",)
@@ -46,12 +47,14 @@ async def test_apply_registers_user_mcp_and_dormant_context_runtime(
         TIMERS,
         PluginTimers(cast(OneShotTimer, object())),
     )
+    _ = await root.context.provide(WAKE_CONTEXT_SOURCE, object())
     data_root = tmp_path / "plugin-data"
     await root.mount(
         ComposablePlugin.from_module(plugin),
         name="steam",
         runtime=PluginRuntime(
             plugin_id="steam",
+            generation_id="steam:test",
             plugin_dir=ROOT,
             data_dir=data_root,
             workspace=tmp_path / "workspace",
@@ -68,7 +71,6 @@ async def test_apply_registers_user_mcp_and_dormant_context_runtime(
     assert server.candidate_env == {"STEAM_BACKEND": "recording"}
     assert not data_root.exists()
     assert root.topology_view().listeners == (
-        "serial:turn.context_prepared:steam",
         "serial:runtime.started:steam",
         "serial:runtime.stopping:steam",
     )
@@ -79,7 +81,7 @@ def test_static_manifest_excludes_state_and_bounded_logs() -> None:
     manifest = load_static_plugin_manifest(ROOT)
 
     assert manifest.name == plugin.name == "steam"
-    assert manifest.version == plugin.version == "3.1.0"
+    assert manifest.version == plugin.version == "3.2.0"
     assert manifest.api_version == plugin.api_version == 3
     assert manifest.requirements == ("mcp/requirements.txt",)
     assert "steam_proactive.sqlite3" in manifest.exclude_data_paths
