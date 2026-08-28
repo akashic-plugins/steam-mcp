@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from agent.control.timer import TimerReceipt, TimerStatus
-from agent.lifecycle.types import BeforeTurnCtx
 from agent.plugin_composition import PluginTimers
 from steam_test_plugin.context_source import SteamContextRuntime  # pyright: ignore[reportMissingImports]
 from steam_test_plugin.steam_runtime import backend  # pyright: ignore[reportMissingImports]
@@ -86,26 +85,21 @@ def _config(data_root: Path) -> None:
     )
 
 
+class _Context:
+    def __init__(self) -> None:
+        self.reports: list[dict[str, object]] = []
+
+    def report(self, **kwargs: object) -> Mapping[str, object]:
+        self.reports.append(dict(kwargs))
+        return {"changed": True}
+
+
 async def _eventually(predicate) -> None:
     for _ in range(200):
         if predicate():
             return
         await asyncio.sleep(0.01)
     raise AssertionError("condition did not settle")
-
-
-def _ctx(now: datetime, channel: str) -> BeforeTurnCtx:
-    return BeforeTurnCtx(
-        session_key="session",
-        channel=channel,
-        chat_id="chat",
-        content="hello",
-        timestamp=now,
-        retrieved_memory_block="",
-        retrieval_trace_raw=None,
-        history_messages=(),
-        turn_id="turn:1",
-    )
 
 
 @pytest.mark.asyncio
@@ -133,6 +127,7 @@ async def test_network_incident_retries_and_recovers(
         PluginTimers(timer),
         health,  # type: ignore[arg-type]
         lambda kind, message: incidents.append((kind, message)),
+        _Context(),  # type: ignore[arg-type]
         now=lambda: now,
     )
     await runtime.start()
@@ -153,7 +148,7 @@ async def test_network_incident_retries_and_recovers(
     await runtime.close()
 
 
-def test_context_listener_is_wake_only_fresh_only_and_read_only(
+def test_current_presence_is_reported_as_expiring_context(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -166,29 +161,21 @@ def test_context_listener_is_wake_only_fresh_only_and_read_only(
     )
     monkeypatch.setattr(backend, "_fetch_recently_played", lambda _: [])
     _ = backend.refresh(tmp_path, now)
-    database = tmp_path / "steam_proactive.sqlite3"
-    before = hashlib.sha256(database.read_bytes()).hexdigest()
+    context = _Context()
     runtime = SteamContextRuntime(
         tmp_path,
         PluginTimers(None),
         _Health(),  # type: ignore[arg-type]
         lambda _kind, _message: None,
+        context,  # type: ignore[arg-type]
         now=lambda: now,
     )
 
-    passive = _ctx(now, "passive")
-    runtime.prepare(passive)
-    wake = _ctx(now + timedelta(minutes=1), "wake")
-    runtime.prepare(wake)
-    stale = _ctx(now + timedelta(minutes=6), "wake")
-    runtime.prepare(stale)
+    runtime._report_current(now)  # pyright: ignore[reportPrivateUsage]
 
-    assert passive.extra_hints == []
-    assert len(wake.extra_hints) == 1
-    assert wake.extra_hints[0].startswith("Steam current context:\n")
-    assert wake.abort is False
-    assert stale.extra_hints == []
-    assert hashlib.sha256(database.read_bytes()).hexdigest() == before
+    assert len(context.reports) == 1
+    assert context.reports[0]["event_id"] == "current"
+    assert context.reports[0]["expires_at"] == now + timedelta(minutes=5)
 
 
 @pytest.mark.asyncio
@@ -206,6 +193,7 @@ async def test_contract_failure_degrades_and_does_not_retry(
         PluginTimers(timer),
         health,  # type: ignore[arg-type]
         lambda kind, message: incidents.append((kind, message)),
+        _Context(),  # type: ignore[arg-type]
         now=lambda: now,
     )
     monkeypatch.setattr(
@@ -223,7 +211,5 @@ async def test_contract_failure_degrades_and_does_not_retry(
 
     assert len(timer.handles) == 1
     assert health.reason == "RuntimeError: schema mismatch"
-    assert incidents == [
-        ("steam_refresh_contract", "RuntimeError: schema mismatch")
-    ]
+    assert incidents == [("steam_refresh_contract", "RuntimeError: schema mismatch")]
     await runtime.close()
