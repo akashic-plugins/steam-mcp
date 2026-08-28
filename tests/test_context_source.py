@@ -174,7 +174,6 @@ def test_current_presence_is_reported_as_expiring_context(
     runtime._report_current(now)  # pyright: ignore[reportPrivateUsage]
 
     assert len(context.reports) == 1
-    assert context.reports[0]["source_id"] == "steam-presence"
     assert context.reports[0]["event_id"] == "current"
     assert context.reports[0]["expires_at"] == now + timedelta(minutes=5)
 

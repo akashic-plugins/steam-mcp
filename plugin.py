@@ -10,9 +10,8 @@ from agent.plugin_composition import (
     Context,
     McpServerDefinition,
 )
-from plugins.wake.contracts import WAKE_CONTEXT_SOURCE
-
 from .context_source import SteamContextRuntime
+from .eventmail import EVENTMAIL_CONTEXT_SOURCE
 
 
 class SteamConfig(BaseModel):
@@ -21,10 +20,10 @@ class SteamConfig(BaseModel):
 
 api_version = 3
 name = "steam"
-version = "3.2.0"
+version = "3.2.1"
 desc = "Timer 上报的 Steam current Context 与用户 MCP"
 Config = SteamConfig
-inject = (MCP_SERVERS, TIMERS, WAKE_CONTEXT_SOURCE)
+inject = (MCP_SERVERS, TIMERS)
 skill_roots = ("skills",)
 
 
@@ -46,19 +45,26 @@ async def apply(ctx: Context, config: object) -> None:
         ),
     )
 
-    # 2. 正式 Root 独占 Timer 刷新并上报 current state。
-    health = await ctx.health("context-refresh", required=True)
-    runtime = SteamContextRuntime(
-        ctx.data_root,
-        ctx.require(TIMERS),
-        health,
-        ctx.report_incident,
-        ctx.require(WAKE_CONTEXT_SOURCE),
+    # 2. EventMail 存在时，独立子 Fiber 才刷新 current state。
+    async def apply_eventmail(source_ctx: Context) -> None:
+        health = await source_ctx.health("context-refresh", required=True)
+        runtime = SteamContextRuntime(
+            source_ctx.data_root,
+            source_ctx.require(TIMERS),
+            health,
+            source_ctx.report_incident,
+            source_ctx.require(EVENTMAIL_CONTEXT_SOURCE).bind("steam-presence"),
+        )
+
+        def setup() -> object:
+            return runtime.close
+
+        _ = await source_ctx.effect(setup, label="steam-context-runtime")
+        _ = await source_ctx.on(RUNTIME_STARTED, lambda _: runtime.start())
+        _ = await source_ctx.on(RUNTIME_STOPPING, lambda _: runtime.close())
+
+    _ = await ctx.inject(
+        (TIMERS, EVENTMAIL_CONTEXT_SOURCE),
+        apply_eventmail,
+        name="steam-eventmail-source",
     )
-
-    def setup() -> object:
-        return runtime.close
-
-    _ = await ctx.effect(setup, label="steam-context-runtime")
-    _ = await ctx.on(RUNTIME_STARTED, lambda _: runtime.start())
-    _ = await ctx.on(RUNTIME_STOPPING, lambda _: runtime.close())

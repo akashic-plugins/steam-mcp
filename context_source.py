@@ -7,10 +7,14 @@ from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from agent.control.timer import TimerHandle, TimerStatus
-from agent.plugin_composition import HealthHandle, PluginTimers
-from plugins.wake.contracts import WakeContextSource
+from agent.plugin_composition import (
+    HealthHandle,
+    PluginTimers,
+    TimerHandle,
+    TimerStatus,
+)
 
+from .eventmail import BoundContextSource
 from .steam_runtime import backend
 
 
@@ -23,7 +27,7 @@ class SteamContextRuntime:
         timers: PluginTimers,
         health: HealthHandle,
         report_incident: Callable[[str, str], object],
-        context: WakeContextSource,
+        context: BoundContextSource,
         *,
         now: Callable[[], datetime] | None = None,
     ) -> None:
@@ -141,7 +145,6 @@ class SteamContextRuntime:
         observed_at = datetime.fromisoformat(str(current["observed_at"]))
         expires_at = datetime.fromisoformat(str(current["expires_at"]))
         _ = self._context.report(
-            source_id="steam-presence",
             event_id="current",
             payload=current,
             observed_at=observed_at,

@@ -12,8 +12,6 @@ from pathlib import Path
 import pytest
 import agent.plugins.manager as plugin_manager_module
 from agent.control.timer import TimerReceipt, TimerStatus
-from agent.lifecycle.composition import CONTEXT_PREPARED_EVENT
-from agent.lifecycle.types import BeforeTurnCtx
 from agent.plugins.manager import PluginManager
 from bus.event_bus import EventBus
 
@@ -21,6 +19,7 @@ from steam_runtime import backend
 
 
 ROOT = Path(__file__).resolve().parents[1]
+CORE_ROOT = Path(os.environ["AKASHIC_AGENT_ROOT"])
 
 
 class _TimerHandle:
@@ -74,6 +73,10 @@ def _stage_plugin(tmp_path: Path) -> Path:
     """复制真实 Steam 插件并链接调用方声明的 artifact 运行时。"""
 
     runtime = Path(os.environ["AKASHIC_PLUGIN_FIXTURE_PYTHON"]).parent.parent
+    shutil.copytree(
+        CORE_ROOT / "plugins" / "eventmail",
+        tmp_path / "plugins" / "eventmail",
+    )
     source = tmp_path / "plugins" / "steam"
     shutil.copytree(
         ROOT,
@@ -165,20 +168,6 @@ def _seed_fresh_state(data_root: Path, now: datetime) -> None:
         connection.commit()
 
 
-def _ctx(now: datetime, channel: str) -> BeforeTurnCtx:
-    return BeforeTurnCtx(
-        session_key="session",
-        channel=channel,
-        chat_id="chat",
-        content="hello",
-        timestamp=now,
-        retrieved_memory_block="",
-        retrieval_trace_raw=None,
-        history_messages=(),
-        turn_id="turn:1",
-    )
-
-
 @pytest.mark.asyncio
 async def test_manager_candidate_context_and_timer_handoff(
     tmp_path: Path,
@@ -217,21 +206,13 @@ async def test_manager_candidate_context_and_timer_handoff(
     assert "get_player_summaries" in runtime.mcp.server("steam").tool_names
     lifecycle = asyncio.create_task(manager.run_runtime_services())
     try:
-        # 1. 稳定 Root 只注册一个 Timer；listener 不影响 passive。
+        # 1. 稳定 Root 只注册一个 Timer；Context 只写 EventMail。
         await _eventually(lambda: sum(len(timer.handles) for timer in timers) == 1)
         formal_timer = next(timer for timer in timers if timer.handles)
-        passive = _ctx(now, "passive")
-        wake = _ctx(now, "wake")
-        _ = await snapshot.composition_root.context.serial(
-            CONTEXT_PREPARED_EVENT,
-            passive,
+        assert not any(
+            listener.startswith("serial:turn.context_prepared")
+            for listener in snapshot.composition_root.topology_view().listeners
         )
-        _ = await snapshot.composition_root.context.serial(
-            CONTEXT_PREPARED_EVENT,
-            wake,
-        )
-        assert passive.extra_hints == []
-        assert len(wake.extra_hints) == 1
 
         # 2. candidate 可握手，但没有 Timer、外网或正式 write set。
         database = data_root / "steam_proactive.sqlite3"
@@ -246,12 +227,7 @@ async def test_manager_candidate_context_and_timer_handoff(
         assert sum(len(timer.handles) for timer in timers) == 1
         candidate_root = candidate.runtime_snapshot.composition_root
         assert candidate_root is not None
-        candidate_wake = _ctx(now, "wake")
-        _ = await candidate_root.context.serial(
-            CONTEXT_PREPARED_EVENT,
-            candidate_wake,
-        )
-        assert candidate_wake.extra_hints == []
+        assert candidate_root.receipt().optional_pending == ()
         assert hashlib.sha256(config.read_bytes()).hexdigest() == formal_hashes["config"]
         assert hashlib.sha256(database.read_bytes()).hexdigest() == formal_hashes["database"]
 
