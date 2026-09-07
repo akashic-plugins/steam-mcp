@@ -19,7 +19,7 @@ from agent.plugin_composition.mcp_slots import (
     _freeze_plugin_mcp_servers,
 )
 from agent.plugins.composable import ComposablePlugin
-from agent.plugins.manager import _copy_validation_data
+from agent.plugins.manager import _copy_validation_tree
 from agent.plugins.static_manifest import load_static_plugin_manifest
 from steam_test_plugin.eventmail import EVENTMAIL_CONTEXT_SOURCE  # pyright: ignore[reportMissingImports]
 
@@ -54,9 +54,11 @@ async def test_apply_registers_user_mcp_and_dormant_context_runtime(
 
     _ = await root.context.provide(EVENTMAIL_CONTEXT_SOURCE, Sources())
     data_root = tmp_path / "plugin-data"
+    composable = ComposablePlugin.from_module(plugin)
     await root.mount(
-        ComposablePlugin.from_module(plugin),
+        composable.apply,
         name="steam",
+        inject=composable.inject,
         runtime=PluginRuntime(
             plugin_id="steam",
             generation_id="steam:test",
@@ -88,9 +90,11 @@ async def test_apply_keeps_user_mcp_without_eventmail(tmp_path: Path) -> None:
     servers = PluginMcpServers(root.instance_token)
     await root.context.provide(MCP_SERVERS, servers)
     await root.context.provide(TIMERS, PluginTimers.candidate_validation())
+    composable = ComposablePlugin.from_module(plugin)
     await root.mount(
-        ComposablePlugin.from_module(plugin),
+        composable.apply,
         name="steam",
+        inject=composable.inject,
         runtime=PluginRuntime(
             plugin_id="steam",
             generation_id="steam:without-eventmail",
@@ -133,7 +137,7 @@ def test_candidate_copy_excludes_formal_state_and_logs(tmp_path: Path) -> None:
     (source / "candidate-visible.txt").write_text("visible", encoding="utf-8")
     target = tmp_path / "validation" / "steam"
 
-    inventory = _copy_validation_data(
+    inventory = _copy_validation_tree(
         source,
         target,
         manifest.exclude_data_paths,

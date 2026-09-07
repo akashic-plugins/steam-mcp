@@ -13,6 +13,8 @@ import pytest
 import agent.plugins.manager as plugin_manager_module
 from agent.control.timer import TimerReceipt, TimerStatus
 from agent.plugins.manager import PluginManager
+from agent.plugins.python_environment import ENVIRONMENT_FILE, PythonEnvironments
+from agent.plugins.static_manifest import load_static_plugin_manifest
 from bus.event_bus import EventBus
 
 from steam_runtime import backend
@@ -93,6 +95,18 @@ def _stage_plugin(tmp_path: Path) -> Path:
     )
     (source / "mcp" / ".venv").symlink_to(runtime, target_is_directory=True)
     return source
+
+
+def _prepare_python_environment(source: Path, workspace: Path) -> None:
+    """通过安装 owner 为测试 artifact 固定独立 Python 环境。"""
+
+    manifest = load_static_plugin_manifest(source)
+    environments = PythonEnvironments(workspace)
+    refs = {
+        item.runtime_root: environments.prepare(source, item)
+        for item in manifest.python
+    }
+    (source / ENVIRONMENT_FILE).write_text(json.dumps(refs), encoding="utf-8")
 
 
 def test_stage_plugin_links_declared_fixture_runtime(
@@ -184,8 +198,10 @@ async def test_manager_candidate_context_and_timer_handoff(
         return timer
 
     monkeypatch.setattr(plugin_manager_module, "AsyncioOneShotTimer", timer_factory)
+    monkeypatch.setenv("STEAM_BACKEND", "recording")
     plugin_root = _stage_plugin(tmp_path)
     workspace = tmp_path / "workspace"
+    _prepare_python_environment(plugin_root, workspace)
     data_root = workspace / "plugin-data" / "steam-builtin"
     config = _config(data_root)
     _seed_fresh_state(data_root, now)
@@ -204,6 +220,10 @@ async def test_manager_candidate_context_and_timer_handoff(
     )
     assert runtime is not None and runtime.mcp is not None
     assert "get_player_summaries" in runtime.mcp.server("steam").tool_names
+    async with runtime.mcp.server("steam").route() as route:
+        call = await route.call("get_player_summaries", {"steamids": []})
+        assert not call.success
+        assert "at least one Steam ID" in call.output
     lifecycle = asyncio.create_task(manager.run_runtime_services())
     try:
         # 1. 稳定 Root 只注册一个 Timer；Context 只写 EventMail。
@@ -222,6 +242,7 @@ async def test_manager_candidate_context_and_timer_handoff(
         }
         with (plugin_root / "plugin.py").open("a", encoding="utf-8") as handle:
             handle.write("\n# candidate fixture revision\n")
+        _prepare_python_environment(plugin_root, workspace)
         candidate = await manager.prepare_candidate("steam")
         assert candidate is not None and candidate.runtime_snapshot is not None
         assert sum(len(timer.handles) for timer in timers) == 1
