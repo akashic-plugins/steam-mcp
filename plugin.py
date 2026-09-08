@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from plugins.tools.plugin import TOOLS
+from .tools import register_tools
+
 from pydantic import BaseModel
 
 from agent.plugin_composition import (
@@ -20,10 +23,10 @@ class SteamConfig(BaseModel):
 
 api_version = 3
 name = "steam"
-version = "3.2.1"
+version = "3.2.2"
 desc = "Timer 上报的 Steam current Context 与用户 MCP"
 Config = SteamConfig
-inject = (MCP_SERVERS, TIMERS)
+inject = (TOOLS, MCP_SERVERS, TIMERS)
 skill_roots = ("skills",)
 
 
@@ -44,6 +47,8 @@ async def apply(ctx: Context, config: object) -> None:
             candidate_env={"STEAM_BACKEND": "recording"},
         ),
     )
+
+    await register_tools(ctx)
 
     # 2. EventMail 存在时，独立子 Fiber 才刷新 current state。
     async def apply_eventmail(source_ctx: Context) -> None:

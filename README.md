@@ -60,3 +60,7 @@ CI 固定 Core `9da3a988a2bf62b0f550bd4f6bb98c4eeb1f56f5`。测试覆盖真实
 PluginManager + stdio MCP + Timer、candidate 零正式 write set、reload Timer
 换班、网络失败恢复、fresh/stale/unknown、Wake/passive 分流、历史保留、日志轮转、
 pyright、compileall、Plugin API contract 和 `git diff --check`。
+
+### 用户工具发现
+
+`plugin.py` 向 `TOOLS` 注册用户工具，保留 `mcp_steam__` 名称。目录来自 MCP `tools/list`，加载插件不会启动 MCP；实际调用才打开本插件的 MCP 路由。服务端负责参数校验，MCP 工具错误和传输失败保留原语义。修改 MCP 签名或描述时同步更新 `tool_catalog.json`。
