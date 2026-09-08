@@ -1,0 +1,304 @@
+[
+  {
+    "name": "get_news_for_app",
+    "description": "获取指定 Steam 游戏的最新新闻。",
+    "parameters": {
+      "properties": {
+        "app_id": {
+          "title": "App Id",
+          "type": "integer"
+        },
+        "count": {
+          "default": 3,
+          "title": "Count",
+          "type": "integer"
+        },
+        "max_length": {
+          "default": 300,
+          "title": "Max Length",
+          "type": "integer"
+        },
+        "format": {
+          "default": "json",
+          "title": "Format",
+          "type": "string"
+        }
+      },
+      "required": [
+        "app_id"
+      ],
+      "title": "get_news_for_appArguments",
+      "type": "object"
+    },
+    "read_only": true
+  },
+  {
+    "name": "get_player_summaries",
+    "description": "获取一个或多个 Steam 玩家摘要信息，需要在 `steam_mcp_config.json` 中配置 `steam_api_key`。",
+    "parameters": {
+      "properties": {
+        "steamids": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "title": "Steamids"
+        },
+        "format": {
+          "default": "json",
+          "title": "Format",
+          "type": "string"
+        }
+      },
+      "required": [
+        "steamids"
+      ],
+      "title": "get_player_summariesArguments",
+      "type": "object"
+    },
+    "read_only": true
+  },
+  {
+    "name": "get_owned_games",
+    "description": "获取玩家拥有的游戏列表，需要配置 `steam_api_key`。",
+    "parameters": {
+      "properties": {
+        "steamid": {
+          "title": "Steamid",
+          "type": "string"
+        },
+        "include_appinfo": {
+          "default": true,
+          "title": "Include Appinfo",
+          "type": "boolean"
+        },
+        "include_played_free_games": {
+          "default": true,
+          "title": "Include Played Free Games",
+          "type": "boolean"
+        },
+        "appids_filter": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Appids Filter"
+        },
+        "format": {
+          "default": "json",
+          "title": "Format",
+          "type": "string"
+        }
+      },
+      "required": [
+        "steamid"
+      ],
+      "title": "get_owned_gamesArguments",
+      "type": "object"
+    },
+    "read_only": true
+  },
+  {
+    "name": "get_recently_played_games",
+    "description": "获取玩家最近玩过的游戏，需要配置 `steam_api_key`。",
+    "parameters": {
+      "properties": {
+        "steamid": {
+          "title": "Steamid",
+          "type": "string"
+        },
+        "count": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Count"
+        },
+        "format": {
+          "default": "json",
+          "title": "Format",
+          "type": "string"
+        }
+      },
+      "required": [
+        "steamid"
+      ],
+      "title": "get_recently_played_gamesArguments",
+      "type": "object"
+    },
+    "read_only": true
+  },
+  {
+    "name": "get_friend_list",
+    "description": "获取玩家好友列表，需要配置 `steam_api_key`。",
+    "parameters": {
+      "properties": {
+        "steamid": {
+          "title": "Steamid",
+          "type": "string"
+        },
+        "relationship": {
+          "default": "friend",
+          "title": "Relationship",
+          "type": "string"
+        },
+        "format": {
+          "default": "json",
+          "title": "Format",
+          "type": "string"
+        }
+      },
+      "required": [
+        "steamid"
+      ],
+      "title": "get_friend_listArguments",
+      "type": "object"
+    },
+    "read_only": true
+  },
+  {
+    "name": "get_player_achievements",
+    "description": "获取玩家在指定游戏中的成就，需要配置 `steam_api_key`。",
+    "parameters": {
+      "properties": {
+        "steamid": {
+          "title": "Steamid",
+          "type": "string"
+        },
+        "app_id": {
+          "title": "App Id",
+          "type": "integer"
+        },
+        "language": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Language"
+        },
+        "format": {
+          "default": "json",
+          "title": "Format",
+          "type": "string"
+        }
+      },
+      "required": [
+        "steamid",
+        "app_id"
+      ],
+      "title": "get_player_achievementsArguments",
+      "type": "object"
+    },
+    "read_only": true
+  },
+  {
+    "name": "get_user_stats_for_game",
+    "description": "获取玩家在指定游戏中的统计数据，需要配置 `steam_api_key`。",
+    "parameters": {
+      "properties": {
+        "steamid": {
+          "title": "Steamid",
+          "type": "string"
+        },
+        "app_id": {
+          "title": "App Id",
+          "type": "integer"
+        },
+        "format": {
+          "default": "json",
+          "title": "Format",
+          "type": "string"
+        }
+      },
+      "required": [
+        "steamid",
+        "app_id"
+      ],
+      "title": "get_user_stats_for_gameArguments",
+      "type": "object"
+    },
+    "read_only": true
+  },
+  {
+    "name": "get_number_of_current_players",
+    "description": "获取指定游戏当前在线人数。",
+    "parameters": {
+      "properties": {
+        "app_id": {
+          "title": "App Id",
+          "type": "integer"
+        },
+        "format": {
+          "default": "json",
+          "title": "Format",
+          "type": "string"
+        }
+      },
+      "required": [
+        "app_id"
+      ],
+      "title": "get_number_of_current_playersArguments",
+      "type": "object"
+    },
+    "read_only": true
+  },
+  {
+    "name": "resolve_app_ids",
+    "description": "批量解析 appid 对应的游戏名。",
+    "parameters": {
+      "properties": {
+        "appids": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "title": "Appids"
+        }
+      },
+      "required": [
+        "appids"
+      ],
+      "title": "resolve_app_idsArguments",
+      "type": "object"
+    },
+    "read_only": true
+  }
+]
