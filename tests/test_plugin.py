@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import cast
 
 from plugins.tools.plugin import TOOLS, ToolCatalog
+from steam_test_plugin.tools import STEAM_TOOLS  # pyright: ignore[reportMissingImports]  # conftest 注册测试包。
 
 import pytest
 from steam_test_plugin import plugin  # pyright: ignore[reportMissingImports]
@@ -84,7 +85,7 @@ async def test_apply_registers_user_mcp_and_dormant_context_runtime(
         "serial:runtime.started:steam-eventmail-source",
         "serial:runtime.stopping:steam-eventmail-source",
     )
-    assert any(item["name"].startswith("mcp_steam__") for item in root.context.require(TOOLS).descriptions())
+    assert any(item["name"].startswith("mcp_steam__") for item in (ref.description for ref in root.context.require(STEAM_TOOLS).refs))
     await root.dispose()
 
 
@@ -111,7 +112,7 @@ async def test_apply_keeps_user_mcp_without_eventmail(tmp_path: Path) -> None:
     )
 
     assert "steam" in _freeze_plugin_mcp_servers(servers, root.instance_token)
-    assert any(item["name"].startswith("mcp_steam__") for item in root.context.require(TOOLS).descriptions())
+    assert any(item["name"].startswith("mcp_steam__") for item in (ref.description for ref in root.context.require(STEAM_TOOLS).refs))
     await root.dispose()
 
 

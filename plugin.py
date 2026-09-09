@@ -48,7 +48,7 @@ async def apply(ctx: Context, config: object) -> None:
         ),
     )
 
-    await register_tools(ctx)
+    await register_tools(ctx, description=desc)
 
     # 2. EventMail 存在时，独立子 Fiber 才刷新 current state。
     async def apply_eventmail(source_ctx: Context) -> None:
