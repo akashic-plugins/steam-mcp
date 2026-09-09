@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import cast
 
 from plugins.tools.plugin import TOOLS, ToolCatalog
-from steam_test_plugin.tools import STEAM_TOOLS
+from steam_test_plugin.tools import STEAM_TOOLS  # pyright: ignore[reportMissingImports]  # conftest 注册测试包。
 
 import pytest
 from steam_test_plugin import plugin  # pyright: ignore[reportMissingImports]
