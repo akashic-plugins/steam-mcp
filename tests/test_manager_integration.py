@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 import agent.plugins.manager as plugin_manager_module
 from agent.control.timer import TimerReceipt, TimerStatus
+from session.log import MessageLog
 from agent.plugins.manager import PluginManager
 from agent.plugins.python_environment import ENVIRONMENT_FILE, PythonEnvironments
 from agent.plugins.static_manifest import load_static_plugin_manifest
@@ -205,8 +206,10 @@ async def test_manager_candidate_context_and_timer_handoff(
     data_root = workspace / "plugin-data" / "steam-builtin"
     config = _config(data_root)
     _seed_fresh_state(data_root, now)
+    log = MessageLog(tmp_path / "sessions.db")
     manager = PluginManager(
-        plugin_dirs=[plugin_root.parent],
+        message_log=log,
+        plugin_dirs=[plugin_root.parent, CORE_ROOT / "plugins" / "tools"],
         event_bus=EventBus(),
         tool_registry=None,
         workspace=workspace,
@@ -268,5 +271,6 @@ async def test_manager_candidate_context_and_timer_handoff(
         lifecycle.cancel()
         _ = await asyncio.gather(lifecycle, return_exceptions=True)
         await manager.terminate_all()
+        log.close()
 
     assert all(handle.future.done() for timer in timers for handle in timer.handles)
