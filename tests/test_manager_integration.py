@@ -209,7 +209,11 @@ async def test_manager_candidate_context_and_timer_handoff(
     log = MessageLog(tmp_path / "sessions.db")
     manager = PluginManager(
         message_log=log,
-        plugin_dirs=[plugin_root.parent, CORE_ROOT / "plugins" / "tools"],
+        plugin_dirs=[
+            plugin_root.parent,
+            CORE_ROOT / "plugins" / "content",
+            CORE_ROOT / "plugins" / "tools",
+        ],
         event_bus=EventBus(),
         tool_registry=None,
         workspace=workspace,
