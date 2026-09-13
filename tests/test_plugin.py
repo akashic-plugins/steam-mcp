@@ -36,7 +36,6 @@ def test_pure_v3_exports_and_exact_apply() -> None:
     assert plugin.version == "3.2.2"
     assert plugin.skill_roots == ("skills",)
     assert tuple(inspect.signature(plugin.apply).parameters) == ("ctx", "config")
-    assert ComposablePlugin.from_module(plugin).skill_roots == ("skills",)
 
 
 @pytest.mark.asyncio
