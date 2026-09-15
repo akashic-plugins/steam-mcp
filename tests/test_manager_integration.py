@@ -9,16 +9,23 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
+from collections.abc import Mapping
+
 import pytest
 import agent.plugins.manager as plugin_manager_module
 from agent.control.timer import TimerReceipt, TimerStatus
+from agent.plugin_composition.bindings import Bindings
+from agent.plugins.selection import PluginSelection
+from agent.plugins.snapshot import lease_runtime_snapshot
+from plugins.tools.plugin import TOOLS
 from session.log import MessageLog
 from agent.plugins.manager import PluginManager
 from agent.plugins.python_environment import ENVIRONMENT_FILE, PythonEnvironments
 from agent.plugins.static_manifest import load_static_plugin_manifest
 from bus.event_bus import EventBus
 
-from steam_runtime import backend
+from steam_test_plugin.steam_runtime import backend  # pyright: ignore[reportMissingImports]
+from steam_test_plugin.tools import STEAM_TOOLS  # pyright: ignore[reportMissingImports]
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -201,7 +208,12 @@ async def test_manager_candidate_context_and_timer_handoff(
     monkeypatch.setattr(plugin_manager_module, "AsyncioOneShotTimer", timer_factory)
     monkeypatch.setenv("STEAM_BACKEND", "recording")
     plugin_root = _stage_plugin(tmp_path)
+    providers = tmp_path / "providers"
+    for provider in ("tools", "mcp", "assets", "content"):
+        shutil.copytree(CORE_ROOT / "plugins" / provider, providers / provider)
     workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    PluginSelection(workspace).initialize()
     _prepare_python_environment(plugin_root, workspace)
     data_root = workspace / "plugin-data" / "steam-builtin"
     config = _config(data_root)
@@ -209,28 +221,34 @@ async def test_manager_candidate_context_and_timer_handoff(
     log = MessageLog(tmp_path / "sessions.db")
     manager = PluginManager(
         message_log=log,
-        plugin_dirs=[
-            plugin_root.parent,
-            CORE_ROOT / "plugins" / "content",
-            CORE_ROOT / "plugins" / "tools",
-        ],
+        plugin_dirs=[plugin_root.parent, providers],
         event_bus=EventBus(),
-        tool_registry=None,
         workspace=workspace,
         installed_cache_root=tmp_path / "cache",
     )
     await manager.load_all()
     snapshot = manager.current_snapshot
     assert snapshot is not None and snapshot.composition_root is not None
-    runtime = manager.composition_generation_host.get(
-        snapshot.generations["steam"].generation_id
-    )
-    assert runtime is not None and runtime.mcp is not None
-    assert "get_player_summaries" in runtime.mcp.server("steam").tool_names
-    async with runtime.mcp.server("steam").route() as route:
-        call = await route.call("get_player_summaries", {"steamids": []})
-        assert not call.success
-        assert "at least one Steam ID" in call.output
+    bound_root = snapshot.composition_root
+    tools = bound_root.context.require(TOOLS)
+    view = bound_root.context.require(STEAM_TOOLS)
+    names = {ref.name for ref in view.refs}
+    assert "mcp_steam__get_player_summaries" in names
+    async with lease_runtime_snapshot(manager.snapshot_store):
+        bindings = Bindings(log, manager._archive, bound_root)  # pyright: ignore[reportPrivateUsage]
+
+        async def allow(_binding: str, _arguments: object) -> Mapping[str, object]:
+            return {"allowed": True}
+
+        execution = tools.execution(allow)
+        binding = tools.bind(
+            view.select("mcp_steam__get_player_summaries"), bindings
+        )
+        call = await execution.execute(
+            "fixture-summaries", binding, {"steamids": []}
+        )
+        assert call.outcome == "error"
+        assert "at least one Steam ID" in str(call.parts[0].value)
     lifecycle = asyncio.create_task(manager.run_runtime_services())
     try:
         # 1. 稳定 Root 只注册一个 Timer；Context 只写 EventMail。

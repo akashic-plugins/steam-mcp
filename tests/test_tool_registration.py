@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from agent.plugin_composition import MCP_SERVERS
-from agent.plugins.mcp_generation_host import McpCallResult
+from agent.plugin_composition.mcp_slots import McpCallResult
 from plugins.tools.plugin import TOOLS, ToolRef, ToolView
 from steam_test_plugin.tools import register_tools  # pyright: ignore[reportMissingImports]  # conftest 注册测试包。
 
