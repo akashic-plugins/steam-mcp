@@ -14,6 +14,9 @@ import agent.plugins.manager as plugin_manager_module
 from agent.control.timer import TimerReceipt, TimerStatus
 from session.log import MessageLog
 from agent.plugins.manager import PluginManager
+from agent.plugins.selection import PluginSelection
+from agent.plugins.snapshot import lease_runtime_snapshot
+from agent.plugin_composition import MCP_SERVERS
 from agent.plugins.python_environment import ENVIRONMENT_FILE, PythonEnvironments
 from agent.plugins.static_manifest import load_static_plugin_manifest
 from bus.event_bus import EventBus
@@ -203,6 +206,7 @@ async def test_manager_candidate_context_and_timer_handoff(
     plugin_root = _stage_plugin(tmp_path)
     workspace = tmp_path / "workspace"
     _prepare_python_environment(plugin_root, workspace)
+    PluginSelection(workspace).initialize()
     data_root = workspace / "plugin-data" / "steam-builtin"
     config = _config(data_root)
     _seed_fresh_state(data_root, now)
@@ -213,24 +217,25 @@ async def test_manager_candidate_context_and_timer_handoff(
             plugin_root.parent,
             CORE_ROOT / "plugins" / "content",
             CORE_ROOT / "plugins" / "tools",
+            CORE_ROOT / "plugins" / "assets",
+            CORE_ROOT / "plugins" / "mcp",
         ],
         event_bus=EventBus(),
-        tool_registry=None,
         workspace=workspace,
         installed_cache_root=tmp_path / "cache",
     )
     await manager.load_all()
     snapshot = manager.current_snapshot
     assert snapshot is not None and snapshot.composition_root is not None
-    runtime = manager.composition_generation_host.get(
-        snapshot.generations["steam"].generation_id
-    )
-    assert runtime is not None and runtime.mcp is not None
-    assert "get_player_summaries" in runtime.mcp.server("steam").tool_names
-    async with runtime.mcp.server("steam").route() as route:
-        call = await route.call("get_player_summaries", {"steamids": []})
-        assert not call.success
-        assert "at least one Steam ID" in call.output
+    servers = snapshot.composition_root.context.require(MCP_SERVERS)
+    contribution = servers._entries["steam"].ctx
+    async with lease_runtime_snapshot(manager.snapshot_store):
+        async with servers.open(contribution, "steam") as server:
+            assert "get_player_summaries" in server.tool_names
+            async with server.route() as route:
+                call = await route.call("get_player_summaries", {"steamids": []})
+                assert not call.success
+                assert "at least one Steam ID" in call.output
     lifecycle = asyncio.create_task(manager.run_runtime_services())
     try:
         # 1. 稳定 Root 只注册一个 Timer；Context 只写 EventMail。
