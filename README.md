@@ -2,6 +2,10 @@
 
 Steam 是 Akashic Plugin API v3 插件。它用现有普通原语组合 current context：
 
+入口是 `plugin.py` 的 `apply(ctx)`，不使用插件 TOML。MCP 通过普通 provider 登记，
+技能目录通过 `INSTALLED_ASSETS.register(ctx, "skills", "skills")` 登记；安装组合需要
+MCP、资产、工具和 Timer 服务。`mcp/requirements.txt` 固定 MCP Python 环境。
+
 ```text
 Core Timer ──触发──> Steam shared domain ──覆盖──> current presence
                               │
@@ -56,7 +60,7 @@ freshness，避免把历史采样频率和当前状态时效揉成一个概念�
 
 ## 验证
 
-CI 固定 Core `9da3a988a2bf62b0f550bd4f6bb98c4eeb1f56f5`。测试覆盖真实
+旧 CI 固定的是迁移前 Core；本次适配未运行测试、Gate 或 CI，不能据此声称已验证。测试源码覆盖真实
 PluginManager + stdio MCP + Timer、candidate 零正式 write set、reload Timer
 换班、网络失败恢复、fresh/stale/unknown、Wake/passive 分流、历史保留、日志轮转、
 pyright、compileall、Plugin API contract 和 `git diff --check`。

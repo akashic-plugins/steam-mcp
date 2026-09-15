@@ -3,8 +3,6 @@ from __future__ import annotations
 from ._tool_contract import TOOLS
 from .tools import register_tools
 
-from pydantic import BaseModel
-
 from agent.plugin_composition import (
     MCP_SERVERS,
     RUNTIME_STARTED,
@@ -13,29 +11,22 @@ from agent.plugin_composition import (
     Context,
     McpServerDefinition,
 )
+from agent.plugin_composition.assets import INSTALLED_ASSETS
 from .context_source import SteamContextRuntime
 from .eventmail import EVENTMAIL_CONTEXT_SOURCE
-
-
-class SteamConfig(BaseModel):
-    pass
 
 
 api_version = 3
 name = "steam"
 version = "3.2.2"
 desc = "Timer 上报的 Steam current Context 与用户 MCP"
-Config = SteamConfig
-inject = (TOOLS, MCP_SERVERS, TIMERS)
-skill_roots = ("skills",)
+inject = (TOOLS, MCP_SERVERS, TIMERS, INSTALLED_ASSETS)
 
 
-async def apply(ctx: Context, config: object) -> None:
+async def apply(ctx: Context) -> None:
     """组合用户 MCP、Timer current state 和 Wake Context 上报。"""
 
-    if not isinstance(config, SteamConfig):
-        raise TypeError("steam config 必须是 SteamConfig")
-
+    await ctx.require(INSTALLED_ASSETS).register(ctx, "skills", "skills")
     # 1. MCP 只保留用户主动查询；candidate 只完成隔离握手。
     await ctx.require(MCP_SERVERS).register(
         ctx,
