@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import inspect
 from pathlib import Path
+from typing import cast
 
 import pytest
 from plugins.tools.plugin import TOOLS, ToolCatalog
+from agent.plugin_composition.tasks import TaskAdmission
+from agent.control.timer import AsyncioOneShotTimer
 from steam_test_plugin.tools import STEAM_TOOLS  # pyright: ignore[reportMissingImports]  # conftest 注册测试包。
 from steam_test_plugin import plugin  # pyright: ignore[reportMissingImports]
 from agent.plugin_composition import (
@@ -51,7 +54,7 @@ def test_pure_v3_exports_and_exact_apply() -> None:
 
 
 @pytest.mark.asyncio
-async def test_apply_registers_user_mcp_and_dormant_context_runtime(
+async def test_apply_registers_user_mcp_and_context_runtime(
     tmp_path: Path,
 ) -> None:
     root = CompositionRoot("steam:test")
@@ -59,8 +62,8 @@ async def test_apply_registers_user_mcp_and_dormant_context_runtime(
     assets = RecordingAssets()
     await root.context.provide(MCP_SERVERS, servers)
     await root.context.provide(INSTALLED_ASSETS, assets)
-    await root.context.provide(TOOLS, ToolCatalog(root.context))
-    await root.context.provide(TIMERS, PluginTimers.candidate_validation())
+    await root.context.provide(TOOLS, ToolCatalog(root.context, cast(TaskAdmission, None)))
+    await root.context.provide(TIMERS, PluginTimers(AsyncioOneShotTimer()))
     class Sources:
         def bind(self, source_id: str) -> object:
             assert source_id == "steam-presence"
@@ -90,7 +93,7 @@ async def test_apply_registers_user_mcp_and_dormant_context_runtime(
     assert server.candidate_read_only_tools == ()
     assert server.candidate_env == {"STEAM_BACKEND": "recording"}
     assert ("skills", "skills") in assets.registrations
-    assert not data_root.exists()
+    assert data_root.is_dir()
     listeners = root.topology_view().listeners
     assert listeners == (
         "serial:runtime.started:steam-eventmail-source",
@@ -106,7 +109,7 @@ async def test_apply_keeps_user_mcp_without_eventmail(tmp_path: Path) -> None:
     servers = RecordingServers()
     await root.context.provide(MCP_SERVERS, servers)
     await root.context.provide(INSTALLED_ASSETS, RecordingAssets())
-    await root.context.provide(TOOLS, ToolCatalog(root.context))
+    await root.context.provide(TOOLS, ToolCatalog(root.context, cast(TaskAdmission, None)))
     await root.context.provide(TIMERS, PluginTimers.candidate_validation())
     composable = ComposablePlugin.from_module(
         plugin, load_static_plugin_manifest(ROOT)

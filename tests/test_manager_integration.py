@@ -14,9 +14,8 @@ from collections.abc import Mapping
 import pytest
 import agent.plugins.manager as plugin_manager_module
 from agent.control.timer import TimerReceipt, TimerStatus
-from agent.plugin_composition.bindings import Bindings
+from agent.plugin_composition.bindings import BINDINGS
 from agent.plugins.selection import PluginSelection
-from agent.plugins.snapshot import lease_runtime_snapshot
 from plugins.tools.plugin import TOOLS
 from session.log import MessageLog
 from agent.plugins.manager import PluginManager
@@ -191,11 +190,11 @@ def _seed_fresh_state(data_root: Path, now: datetime) -> None:
 
 
 @pytest.mark.asyncio
-async def test_manager_candidate_context_and_timer_handoff(
+async def test_manager_live_context_and_timer_handoff(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """验证真实 MCP、Wake hint、静默 candidate 与 Timer 换班。"""
+    """验证真实 MCP、Wake hint 与同一 Root 上的 Timer 换班。"""
 
     now = datetime(2026, 8, 23, 8, tzinfo=UTC)
     timers: list[_Timer] = []
@@ -227,15 +226,16 @@ async def test_manager_candidate_context_and_timer_handoff(
         installed_cache_root=tmp_path / "cache",
     )
     await manager.load_all()
-    snapshot = manager.current_snapshot
-    assert snapshot is not None and snapshot.composition_root is not None
-    bound_root = snapshot.composition_root
+    bound_root = manager.live_root
+    assert bound_root is not None
     tools = bound_root.context.require(TOOLS)
     view = bound_root.context.require(STEAM_TOOLS)
     names = {ref.name for ref in view.refs}
     assert "mcp_steam__get_player_summaries" in names
-    async with lease_runtime_snapshot(manager.snapshot_store):
-        bindings = Bindings(log, manager._archive, bound_root)  # pyright: ignore[reportPrivateUsage]
+    tool_generation = manager.generation("tools")
+    assert tool_generation is not None and tool_generation.fiber is not None
+    async with tool_generation.fiber.context.runtime_scope():
+        bindings = bound_root.context.require(BINDINGS)
 
         async def allow(_binding: str, _arguments: object) -> Mapping[str, object]:
             return {"allowed": True}
@@ -249,37 +249,35 @@ async def test_manager_candidate_context_and_timer_handoff(
         )
         assert call.outcome == "error"
         assert "at least one Steam ID" in str(call.parts[0].value)
-    lifecycle = asyncio.create_task(manager.run_runtime_services())
+    await manager.start_runtime()
     try:
         # 1. 稳定 Root 只注册一个 Timer；Context 只写 EventMail。
         await _eventually(lambda: sum(len(timer.handles) for timer in timers) == 1)
         formal_timer = next(timer for timer in timers if timer.handles)
         assert not any(
             listener.startswith("serial:turn.context_prepared")
-            for listener in snapshot.composition_root.topology_view().listeners
+            for listener in bound_root.topology_view().listeners
         )
 
-        # 2. candidate 可握手，但没有 Timer、外网或正式 write set。
+        # 2. 变更源码后在同一 Root 换代，保留正式配置和数据库。
         database = data_root / "steam_proactive.sqlite3"
-        formal_hashes = {
-            "config": hashlib.sha256(config.read_bytes()).hexdigest(),
-            "database": hashlib.sha256(database.read_bytes()).hexdigest(),
-        }
+        config_hash = hashlib.sha256(config.read_bytes()).hexdigest()
         with (plugin_root / "plugin.py").open("a", encoding="utf-8") as handle:
-            handle.write("\n# candidate fixture revision\n")
+            handle.write("\n# live update fixture revision\n")
         _prepare_python_environment(plugin_root, workspace)
-        candidate = await manager.prepare_candidate("steam")
-        assert candidate is not None and candidate.runtime_snapshot is not None
-        assert sum(len(timer.handles) for timer in timers) == 1
-        candidate_root = candidate.runtime_snapshot.composition_root
-        assert candidate_root is not None
-        assert candidate_root.receipt().optional_pending == ()
-        assert hashlib.sha256(config.read_bytes()).hexdigest() == formal_hashes["config"]
-        assert hashlib.sha256(database.read_bytes()).hexdigest() == formal_hashes["database"]
+        old = manager.generation("steam")
+        assert old is not None
+        result = next(item for item in await manager.reconcile_changed() if item["plugin_id"] == "steam")
+        assert result["publication_state"] == "active"
+        assert manager.live_root is bound_root
+        assert manager.generation("steam") is not old
+        receipt = bound_root.receipt()
+        assert "steam-eventmail-source" not in receipt.optional_pending, receipt.incidents
+        assert hashlib.sha256(config.read_bytes()).hexdigest() == config_hash
+        with sqlite3.connect(database) as connection:
+            assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
 
-        # 3. 发布先取消旧 Timer，再由新稳定 Root 注册一个 Timer。
-        result = await manager.publish_prepared("steam")
-        assert result["publication_state"] == "committed"
+        # 3. 旧 Timer 取消，新 owner 注册一个 Timer。
         await _eventually(lambda: sum(len(timer.handles) for timer in timers) == 2)
         assert (await formal_timer.handles[0].result()).status is TimerStatus.CANCELLED
         active = [
@@ -290,8 +288,6 @@ async def test_manager_candidate_context_and_timer_handoff(
         ]
         assert len(active) == 1
     finally:
-        lifecycle.cancel()
-        _ = await asyncio.gather(lifecycle, return_exceptions=True)
         await manager.terminate_all()
         log.close()
 
