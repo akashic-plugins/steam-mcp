@@ -67,7 +67,11 @@ async def test_apply_registers_user_mcp_and_context_runtime(
     class Sources:
         def bind(self, source_id: str) -> object:
             assert source_id == "steam-presence"
-            return object()
+            class Bound:
+                def close(self) -> None:
+                    return None
+
+            return Bound()
 
     _ = await root.context.provide(EVENTMAIL_CONTEXT_SOURCE, Sources())
     data_root = tmp_path / "plugin-data"

@@ -8,6 +8,8 @@ from agent.plugin_composition import ServiceKey
 
 
 class BoundContextSource(Protocol):
+    def close(self) -> None: ...
+
     def report(
         self,
         *,
