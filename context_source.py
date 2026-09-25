@@ -55,7 +55,7 @@ class SteamContextRuntime:
         now = self._aware_now()
         await asyncio.to_thread(backend.initialize, self._data_root, now)
         deadline = await asyncio.to_thread(backend.next_deadline, self._data_root, now)
-        await asyncio.to_thread(self._report_current, now)
+        await self._report_current(now)
         self._arm(deadline)
 
     async def close(self) -> None:
@@ -124,7 +124,7 @@ class SteamContextRuntime:
             else:
                 self._health.recover()
                 next_due = result.next_due
-                await asyncio.to_thread(self._report_current, now)
+                await self._report_current(now)
                 self._log.info(
                     "refresh committed presence=%s history_appended=%s next_due=%s",
                     result.presence,
@@ -138,8 +138,10 @@ class SteamContextRuntime:
         if not self._closed and next_due is not None:
             self._arm(next_due)
 
-    def _report_current(self, now: datetime) -> None:
-        current = backend.wake_context(self._data_root, now)
+    async def _report_current(self, now: datetime) -> None:
+        """在线程中读取本地状态，在事件循环中调用 Context 能力。"""
+
+        current = await asyncio.to_thread(backend.wake_context, self._data_root, now)
         if current is None:
             return
         observed_at = datetime.fromisoformat(str(current["observed_at"]))
