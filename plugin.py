@@ -50,12 +50,14 @@ async def apply(ctx: Context) -> None:
     # 2. EventMail 存在时，独立子 Fiber 才刷新 current state。
     async def apply_eventmail(source_ctx: Context) -> None:
         health = await source_ctx.health("context-refresh", required=True)
+        source = source_ctx.require(EVENTMAIL_CONTEXT_SOURCE).bind("steam-presence")
+        _ = await source_ctx.effect(lambda: source.close, label="steam-eventmail-source")
         runtime = SteamContextRuntime(
             source_ctx.data_root,
             source_ctx.require(TIMERS),
             health,
             source_ctx.report_incident,
-            source_ctx.require(EVENTMAIL_CONTEXT_SOURCE).bind("steam-presence"),
+            source,
         )
 
         def setup() -> object:
