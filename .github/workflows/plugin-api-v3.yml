@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: akashic-plugins/plugin-contracts
-          ref: 4dd69dd621e029e51e99aa428443fa3a4ec1f6cf
+          ref: fca5fa976da4a84171a36b57af7c52fae0dea3c4
           path: .cache/plugin-contracts
       - uses: actions/setup-python@v5
         with:
