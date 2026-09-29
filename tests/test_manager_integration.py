@@ -10,7 +10,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-import agent.plugins.manager as plugin_manager_module
+import agent.plugins.host as plugin_host_module
+from agent.plugin_composition.bindings import BINDINGS
+from agent.plugin_contracts.tools import ALL_TOOLS, TOOLS
+from agent.plugins.selection import PluginSelection
+from plugins.tools.plugin import open_tool
 from agent.control.timer import TimerReceipt, TimerStatus
 from session.log import MessageLog
 from agent.plugins.manager import PluginManager
@@ -86,6 +90,7 @@ def _stage_plugin(tmp_path: Path) -> Path:
         source,
         ignore=shutil.ignore_patterns(
             ".git",
+            ".cache",
             ".akashic-core",
             ".plugin-contracts",
             ".pytest_cache",
@@ -184,12 +189,11 @@ def _seed_fresh_state(data_root: Path, now: datetime) -> None:
 
 
 @pytest.mark.asyncio
-async def test_manager_candidate_context_and_timer_handoff(
+async def test_manager_real_mcp_and_timer_handoff(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """验证真实 MCP、Wake hint、静默 candidate 与 Timer 换班。"""
-
+    """Load the real provider, call recording MCP, and drain its timer on update."""
     now = datetime(2026, 8, 23, 8, tzinfo=UTC)
     timers: list[_Timer] = []
 
@@ -198,83 +202,64 @@ async def test_manager_candidate_context_and_timer_handoff(
         timers.append(timer)
         return timer
 
-    monkeypatch.setattr(plugin_manager_module, "AsyncioOneShotTimer", timer_factory)
+    monkeypatch.setattr(plugin_host_module, "AsyncioOneShotTimer", timer_factory)
     monkeypatch.setenv("STEAM_BACKEND", "recording")
     plugin_root = _stage_plugin(tmp_path)
     workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    PluginSelection(workspace).initialize()
     _prepare_python_environment(plugin_root, workspace)
     data_root = workspace / "plugin-data" / "steam-builtin"
     config = _config(data_root)
     _seed_fresh_state(data_root, now)
+    config_digest = hashlib.sha256(config.read_bytes()).hexdigest()
     log = MessageLog(tmp_path / "sessions.db")
+    events = EventBus()
     manager = PluginManager(
         message_log=log,
-        plugin_dirs=[
-            plugin_root.parent,
-            CORE_ROOT / "plugins" / "content",
-            CORE_ROOT / "plugins" / "tools",
-        ],
-        event_bus=EventBus(),
-        tool_registry=None,
+        plugin_dirs=[plugin_root.parent, *(CORE_ROOT / "plugins" / name for name in
+                      ("content", "tools", "mcp", "managed_processes"))],
+        event_bus=events,
         workspace=workspace,
         installed_cache_root=tmp_path / "cache",
     )
-    await manager.load_all()
-    snapshot = manager.current_snapshot
-    assert snapshot is not None and snapshot.composition_root is not None
-    runtime = manager.composition_generation_host.get(
-        snapshot.generations["steam"].generation_id
-    )
-    assert runtime is not None and runtime.mcp is not None
-    assert "get_player_summaries" in runtime.mcp.server("steam").tool_names
-    async with runtime.mcp.server("steam").route() as route:
-        call = await route.call("get_player_summaries", {"steamids": []})
-        assert not call.success
-        assert "at least one Steam ID" in call.output
-    lifecycle = asyncio.create_task(manager.run_runtime_services())
     try:
-        # 1. 稳定 Root 只注册一个 Timer；Context 只写 EventMail。
+        # 1. The live Fiber starts its context owner when it becomes ready.
+        await manager.load_all()
+        root = manager.live_root
+        old = manager.generation("steam")
+        assert root is not None and old is not None and old.fiber is not None
+        refs = root.context.require(ALL_TOOLS)().refs
+        target = next(ref for ref in refs if ref.name == "mcp_steam__get_player_summaries")
+        assert "risk" not in target.description
+        await manager.start_runtime()
         await _eventually(lambda: sum(len(timer.handles) for timer in timers) == 1)
         formal_timer = next(timer for timer in timers if timer.handles)
-        assert not any(
-            listener.startswith("serial:turn.context_prepared")
-            for listener in snapshot.composition_root.topology_view().listeners
-        )
 
-        # 2. candidate 可握手，但没有 Timer、外网或正式 write set。
-        database = data_root / "steam_proactive.sqlite3"
-        formal_hashes = {
-            "config": hashlib.sha256(config.read_bytes()).hexdigest(),
-            "database": hashlib.sha256(database.read_bytes()).hexdigest(),
-        }
+        # 2. Open the actual granted tool and recording MCP process.
+        bindings = root.context.require(BINDINGS)
+        identity = await root.context.require(TOOLS).bind(target, bindings)
+        async with open_tool(bindings, identity) as tool:
+            call = await tool.invoke("invalid-steam-id", {"steamids": []})
+            assert call.outcome == "error"
+            assert "at least one Steam ID" in str(call.parts)
+
+        # 3. A local replacement drains the old timer while retaining business data.
         with (plugin_root / "plugin.py").open("a", encoding="utf-8") as handle:
-            handle.write("\n# candidate fixture revision\n")
-        _prepare_python_environment(plugin_root, workspace)
-        candidate = await manager.prepare_candidate("steam")
-        assert candidate is not None and candidate.runtime_snapshot is not None
-        assert sum(len(timer.handles) for timer in timers) == 1
-        candidate_root = candidate.runtime_snapshot.composition_root
-        assert candidate_root is not None
-        assert candidate_root.receipt().optional_pending == ()
-        assert hashlib.sha256(config.read_bytes()).hexdigest() == formal_hashes["config"]
-        assert hashlib.sha256(database.read_bytes()).hexdigest() == formal_hashes["database"]
-
-        # 3. 发布先取消旧 Timer，再由新稳定 Root 注册一个 Timer。
-        result = await manager.publish_prepared("steam")
-        assert result["publication_state"] == "committed"
+            handle.write("\n# replacement fixture revision\n")
+        result = await manager.reconcile_changed()
+        assert any(row["publication_state"] == "active" for row in result)
+        assert manager.generation("steam") is not old
+        assert old.scope.closed
+        assert manager.live_root is root
         await _eventually(lambda: sum(len(timer.handles) for timer in timers) == 2)
         assert (await formal_timer.handles[0].result()).status is TimerStatus.CANCELLED
-        active = [
-            handle
-            for timer in timers
-            for handle in timer.handles
-            if not handle.future.done()
-        ]
-        assert len(active) == 1
+        assert len([handle for timer in timers for handle in timer.handles
+                    if not handle.future.done()]) == 1
+        assert hashlib.sha256(config.read_bytes()).hexdigest() == config_digest
+        assert (data_root / "steam_proactive.sqlite3").exists()
     finally:
-        lifecycle.cancel()
-        _ = await asyncio.gather(lifecycle, return_exceptions=True)
         await manager.terminate_all()
         log.close()
-
+        await events.aclose()
     assert all(handle.future.done() for timer in timers for handle in timer.handles)

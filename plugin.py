@@ -25,16 +25,13 @@ api_version = 3
 name = "steam"
 version = "3.2.2"
 desc = "Timer 上报的 Steam current Context 与用户 MCP"
-Config = SteamConfig
 inject = (TOOLS, MCP_SERVERS, TIMERS)
 skill_roots = ("skills",)
 
 
-async def apply(ctx: Context, config: object) -> None:
+async def apply(ctx: Context) -> None:
     """组合用户 MCP、Timer current state 和 Wake Context 上报。"""
-
-    if not isinstance(config, SteamConfig):
-        raise TypeError("steam config 必须是 SteamConfig")
+    _ = SteamConfig.model_validate(ctx.config)
 
     # 1. MCP 只保留用户主动查询；candidate 只完成隔离握手。
     await ctx.require(MCP_SERVERS).register(
@@ -53,12 +50,14 @@ async def apply(ctx: Context, config: object) -> None:
     # 2. EventMail 存在时，独立子 Fiber 才刷新 current state。
     async def apply_eventmail(source_ctx: Context) -> None:
         health = await source_ctx.health("context-refresh", required=True)
+        source = source_ctx.require(EVENTMAIL_CONTEXT_SOURCE).bind("steam-presence")
+        _ = await source_ctx.effect(lambda: source.close, label="steam-eventmail-source")
         runtime = SteamContextRuntime(
             source_ctx.data_root,
             source_ctx.require(TIMERS),
             health,
             source_ctx.report_incident,
-            source_ctx.require(EVENTMAIL_CONTEXT_SOURCE).bind("steam-presence"),
+            source,
         )
 
         def setup() -> object:
