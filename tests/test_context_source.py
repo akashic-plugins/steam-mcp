@@ -89,7 +89,7 @@ class _Context:
     def __init__(self) -> None:
         self.reports: list[dict[str, object]] = []
 
-    def report(self, **kwargs: object) -> Mapping[str, object]:
+    async def report(self, **kwargs: object) -> Mapping[str, object]:
         self.reports.append(dict(kwargs))
         return {"changed": True}
 
@@ -148,7 +148,8 @@ async def test_network_incident_retries_and_recovers(
     await runtime.close()
 
 
-def test_current_presence_is_reported_as_expiring_context(
+@pytest.mark.asyncio
+async def test_current_presence_is_reported_as_expiring_context(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -171,7 +172,7 @@ def test_current_presence_is_reported_as_expiring_context(
         now=lambda: now,
     )
 
-    runtime._report_current(now)  # pyright: ignore[reportPrivateUsage]
+    await runtime._report_current(now)  # pyright: ignore[reportPrivateUsage]
 
     assert len(context.reports) == 1
     assert context.reports[0]["event_id"] == "current"
