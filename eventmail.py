@@ -10,7 +10,7 @@ from agent.plugin_composition import ServiceKey
 class BoundContextSource(Protocol):
     def close(self) -> None: ...
 
-    def report(
+    async def report(
         self,
         *,
         event_id: str,
@@ -25,5 +25,5 @@ class ContextSourceServices(Protocol):
 
 
 EVENTMAIL_CONTEXT_SOURCE = ServiceKey[ContextSourceServices](
-    "eventmail.context_source.v1"
+    "eventmail.context_source.v2"
 )
