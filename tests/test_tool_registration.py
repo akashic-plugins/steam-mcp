@@ -6,8 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from agent.plugin_composition import MCP_SERVERS
-from agent.plugin_composition.mcp_slots import McpCallResult
+from plugins.mcp.contract import MCP_SERVERS
+from plugins.mcp.contract import McpCallResult
 from plugins.tools.plugin import TOOLS, ToolRef, ToolView
 from steam_test_plugin.tools import register_tools  # pyright: ignore[reportMissingImports]  # conftest 注册测试包。
 

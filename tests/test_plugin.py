@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from plugins.timer.timer import AsyncioOneShotTimer
+
 import inspect
 from pathlib import Path
 from typing import cast
@@ -9,14 +11,10 @@ from steam_test_plugin.tools import STEAM_TOOLS  # pyright: ignore[reportMissing
 
 import pytest
 from steam_test_plugin import plugin  # pyright: ignore[reportMissingImports]
-from agent.plugin_composition import (
-    MCP_SERVERS,
-    TIMERS,
-    CompositionRoot,
-    PluginRuntime,
-    PluginTimers,
-)
-from agent.plugin_composition.mcp_slots import McpServerDefinition, McpServers
+from agent.plugin_composition import CompositionRoot, PluginRuntime
+from plugins.mcp.contract import MCP_SERVERS
+from plugins.timer.contract import TIMERS
+from plugins.mcp.contract import McpServerDefinition, McpServers
 from agent.plugins.composable import ComposablePlugin
 from agent.plugin_composition.tasks import Tasks
 from agent.plugins.static_manifest import load_static_plugin_manifest
@@ -38,7 +36,7 @@ class _RecordingMcpServers:
 def test_pure_v3_exports_and_exact_apply() -> None:
     assert plugin.api_version == 3
     assert plugin.name == "steam"
-    assert plugin.version == "3.2.2"
+    assert plugin.version == "3.2.3"
     assert plugin.skill_roots == ("skills",)
     assert tuple(inspect.signature(plugin.apply).parameters) == ("ctx",)
 
@@ -49,7 +47,7 @@ async def test_apply_keeps_user_mcp_without_eventmail(tmp_path: Path) -> None:
     servers = _RecordingMcpServers()
     await root.context.provide(MCP_SERVERS, cast(McpServers, servers))
     await root.context.provide(TOOLS, ToolCatalog(root.context, Tasks()))
-    await root.context.provide(TIMERS, PluginTimers.candidate_validation())
+    await root.context.provide(TIMERS, AsyncioOneShotTimer())
     composable = ComposablePlugin.from_module(plugin, load_static_plugin_manifest(ROOT))
     await root.mount(
         composable.apply,
@@ -78,7 +76,7 @@ def test_static_manifest_declares_the_python_install_input() -> None:
     manifest = load_static_plugin_manifest(ROOT)
 
     assert manifest.name == plugin.name == "steam"
-    assert manifest.version == plugin.version == "3.2.2"
+    assert manifest.version == plugin.version == "3.2.3"
     assert manifest.api_version == plugin.api_version == 3
     assert manifest.requirements == ("mcp/requirements.txt",)
     assert manifest.python[0].runtime_root == "mcp"

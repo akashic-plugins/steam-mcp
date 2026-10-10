@@ -7,12 +7,8 @@ from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from agent.plugin_composition import (
-    HealthHandle,
-    PluginTimers,
-    TimerHandle,
-    TimerStatus,
-)
+from agent.plugin_composition import HealthHandle
+from plugins.timer.contract import OneShotTimer, TimerHandle, TimerStatus
 
 from .eventmail import BoundContextSource
 from .steam_runtime import backend
@@ -24,7 +20,7 @@ class SteamContextRuntime:
     def __init__(
         self,
         data_root: Path,
-        timers: PluginTimers,
+        timers: OneShotTimer,
         health: HealthHandle,
         report_incident: Callable[[str, str], object],
         context: BoundContextSource,
