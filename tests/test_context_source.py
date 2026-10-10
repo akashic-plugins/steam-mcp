@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from plugins.timer.timer import AsyncioOneShotTimer
+
 import asyncio
 import json
 from collections.abc import Mapping
@@ -8,8 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from agent.control.timer import TimerReceipt, TimerStatus
-from agent.plugin_composition import PluginTimers
+from plugins.timer.contract import TimerReceipt, TimerStatus
 from steam_test_plugin.context_source import SteamContextRuntime  # pyright: ignore[reportMissingImports]
 from steam_test_plugin.steam_runtime import backend  # pyright: ignore[reportMissingImports]
 
@@ -124,7 +125,7 @@ async def test_network_incident_retries_and_recovers(
     monkeypatch.setattr(backend, "refresh", refresh)
     runtime = SteamContextRuntime(
         tmp_path,
-        PluginTimers(timer),
+        timer,
         health,  # type: ignore[arg-type]
         lambda kind, message: incidents.append((kind, message)),
         _Context(),  # type: ignore[arg-type]
@@ -165,7 +166,7 @@ async def test_current_presence_is_reported_as_expiring_context(
     context = _Context()
     runtime = SteamContextRuntime(
         tmp_path,
-        PluginTimers(None),
+        AsyncioOneShotTimer(),
         _Health(),  # type: ignore[arg-type]
         lambda _kind, _message: None,
         context,  # type: ignore[arg-type]
@@ -191,7 +192,7 @@ async def test_contract_failure_degrades_and_does_not_retry(
     incidents: list[tuple[str, str]] = []
     runtime = SteamContextRuntime(
         tmp_path,
-        PluginTimers(timer),
+        timer,
         health,  # type: ignore[arg-type]
         lambda kind, message: incidents.append((kind, message)),
         _Context(),  # type: ignore[arg-type]

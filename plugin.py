@@ -5,14 +5,9 @@ from .tools import register_tools
 
 from pydantic import BaseModel
 
-from agent.plugin_composition import (
-    MCP_SERVERS,
-    RUNTIME_STARTED,
-    RUNTIME_STOPPING,
-    TIMERS,
-    Context,
-    McpServerDefinition,
-)
+from agent.plugin_composition import RUNTIME_STARTED, RUNTIME_STOPPING, Context
+from plugins.mcp.contract import MCP_SERVERS, McpServerDefinition
+from plugins.timer.contract import TIMERS
 from .context_source import SteamContextRuntime
 from .eventmail import EVENTMAIL_CONTEXT_SOURCE
 
@@ -23,7 +18,7 @@ class SteamConfig(BaseModel):
 
 api_version = 3
 name = "steam"
-version = "3.2.2"
+version = "3.2.3"
 desc = "Timer 上报的 Steam current Context 与用户 MCP"
 inject = (TOOLS, MCP_SERVERS, TIMERS)
 skill_roots = ("skills",)

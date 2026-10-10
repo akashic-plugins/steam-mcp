@@ -10,17 +10,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-import agent.plugins.host as plugin_host_module
+from agent.plugins.importer import FreshSourceLoader
 from agent.plugin_composition.bindings import BINDINGS
 from agent.plugin_contracts.tools import ALL_TOOLS, TOOLS
 from agent.plugins.selection import PluginSelection
 from plugins.tools.plugin import open_tool
-from agent.control.timer import TimerReceipt, TimerStatus
+from plugins.timer.contract import TimerReceipt, TimerStatus
 from session.log import MessageLog
 from agent.plugins.manager import PluginManager
 from agent.plugins.python_environment import ENVIRONMENT_FILE, PythonEnvironments
 from agent.plugins.static_manifest import load_static_plugin_manifest
-from bus.event_bus import EventBus
 
 from steam_runtime import backend
 
@@ -66,6 +65,9 @@ class _Timer:
         handle = _TimerHandle(f"timer:{len(self.handles)}", deadline, self.now)
         self.handles.append(handle)
         return handle
+
+    async def close(self) -> None:
+        await asyncio.gather(*(handle.cleanup() for handle in self.handles))
 
 
 async def _eventually(predicate) -> None:
@@ -202,7 +204,16 @@ async def test_manager_real_mcp_and_timer_handoff(
         timers.append(timer)
         return timer
 
-    monkeypatch.setattr(plugin_host_module, "AsyncioOneShotTimer", timer_factory)
+    # Timer instances belong to fresh plugin generations, not the Core host.
+    load_module = FreshSourceLoader.exec_module
+
+    def load_timer(loader, module):
+        load_module(loader, module)
+        path = Path(module.__file__)
+        if path.name == "plugin.py" and path.parent.name == "timer":
+            module.AsyncioOneShotTimer = timer_factory
+
+    monkeypatch.setattr(FreshSourceLoader, "exec_module", load_timer)
     monkeypatch.setenv("STEAM_BACKEND", "recording")
     plugin_root = _stage_plugin(tmp_path)
     workspace = tmp_path / "workspace"
@@ -214,12 +225,11 @@ async def test_manager_real_mcp_and_timer_handoff(
     _seed_fresh_state(data_root, now)
     config_digest = hashlib.sha256(config.read_bytes()).hexdigest()
     log = MessageLog(tmp_path / "sessions.db")
-    events = EventBus()
+
     manager = PluginManager(
         message_log=log,
         plugin_dirs=[plugin_root.parent, *(CORE_ROOT / "plugins" / name for name in
-                      ("content", "tools", "mcp", "managed_processes"))],
-        event_bus=events,
+                      ("content", "tools", "mcp", "managed_processes", "timer"))],
         workspace=workspace,
         installed_cache_root=tmp_path / "cache",
     )
@@ -261,5 +271,5 @@ async def test_manager_real_mcp_and_timer_handoff(
     finally:
         await manager.terminate_all()
         log.close()
-        await events.aclose()
+
     assert all(handle.future.done() for timer in timers for handle in timer.handles)
