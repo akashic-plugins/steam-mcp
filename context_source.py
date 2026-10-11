@@ -10,7 +10,7 @@ from pathlib import Path
 from agent.plugin_composition import HealthHandle
 from plugins.timer.contract import OneShotTimer, TimerHandle, TimerStatus
 
-from .eventmail import BoundContextSource
+from plugins.eventmail.contract import BoundContextSource
 from .steam_runtime import backend
 
 
