@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ._tool_contract import TOOLS
+from plugins.tools.contract import TOOLS
 from .tools import register_tools
 
 from pydantic import BaseModel
@@ -9,7 +9,7 @@ from agent.plugin_composition import RUNTIME_STARTED, RUNTIME_STOPPING, Context
 from plugins.mcp.contract import MCP_SERVERS, McpServerDefinition
 from plugins.timer.contract import TIMERS
 from .context_source import SteamContextRuntime
-from .eventmail import EVENTMAIL_CONTEXT_SOURCE
+from plugins.eventmail.contract import EVENTMAIL_CONTEXT_SOURCE
 
 
 class SteamConfig(BaseModel):
