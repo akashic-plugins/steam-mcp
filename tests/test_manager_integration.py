@@ -78,14 +78,39 @@ async def _eventually(predicate) -> None:
     raise AssertionError("condition did not settle")
 
 
+_WATCH_STUB = """from agent.plugin_composition import Context
+
+from .contract import WATCH_EVENTS
+
+api_version = 3
+name = "watch"
+version = "0.0.0"
+desc = "测试用值班：只收下事件"
+
+
+class _Events:
+    async def emit(self, source: str, **_kwargs: object) -> str:
+        return source
+
+
+async def apply(ctx: Context) -> None:
+    _ = await ctx.provide(WATCH_EVENTS, _Events())
+"""
+
+
+# 用 Core 真实的值班合同加一个只收事件的提供方，避免拉起值班自己的全部依赖。
+def _stage_watch_stub(target: Path) -> None:
+    target.mkdir(parents=True)
+    _ = shutil.copy(CORE_ROOT / "plugins" / "watch" / "contract.py", target / "contract.py")
+    (target / "__init__.py").write_text("", encoding="utf-8")
+    (target / "plugin.py").write_text(_WATCH_STUB, encoding="utf-8")
+
+
 def _stage_plugin(tmp_path: Path) -> Path:
     """复制真实 Steam 插件并链接调用方声明的 artifact 运行时。"""
 
     runtime = Path(os.environ["AKASHIC_PLUGIN_FIXTURE_PYTHON"]).parent.parent
-    shutil.copytree(
-        CORE_ROOT / "plugins" / "eventmail",
-        tmp_path / "plugins" / "eventmail",
-    )
+    _stage_watch_stub(tmp_path / "plugins" / "watch")
     source = tmp_path / "plugins" / "steam"
     shutil.copytree(
         ROOT,
@@ -236,7 +261,6 @@ async def test_manager_real_mcp_and_timer_handoff(
         refs = root.context.require(ALL_TOOLS)().refs
         target = next(ref for ref in refs if ref.name == "mcp_steam__get_player_summaries")
         assert "risk" not in target.description
-        await manager.start_runtime()
         await _eventually(lambda: sum(len(timer.handles) for timer in timers) == 1)
         formal_timer = next(timer for timer in timers if timer.handles)
 

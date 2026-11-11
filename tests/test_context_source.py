@@ -4,7 +4,6 @@ from plugins.timer.timer import AsyncioOneShotTimer
 
 import asyncio
 import json
-from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -86,13 +85,13 @@ def _config(data_root: Path) -> None:
     )
 
 
-class _Context:
+class _Events:
     def __init__(self) -> None:
-        self.reports: list[dict[str, object]] = []
+        self.emitted: list[dict[str, object]] = []
 
-    async def report(self, **kwargs: object) -> Mapping[str, object]:
-        self.reports.append(dict(kwargs))
-        return {"changed": True}
+    async def emit(self, source: str, **kwargs: object) -> str:
+        self.emitted.append({"source": source, **kwargs})
+        return f"event:{len(self.emitted)}"
 
 
 async def _eventually(predicate) -> None:
@@ -128,7 +127,7 @@ async def test_network_incident_retries_and_recovers(
         timer,
         health,  # type: ignore[arg-type]
         lambda kind, message: incidents.append((kind, message)),
-        _Context(),  # type: ignore[arg-type]
+        _Events(),  # type: ignore[arg-type]
         now=lambda: now,
     )
     await runtime.start()
@@ -150,7 +149,7 @@ async def test_network_incident_retries_and_recovers(
 
 
 @pytest.mark.asyncio
-async def test_current_presence_is_reported_as_expiring_context(
+async def test_current_presence_is_emitted_as_watch_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -163,21 +162,26 @@ async def test_current_presence_is_reported_as_expiring_context(
     )
     monkeypatch.setattr(backend, "_fetch_recently_played", lambda _: [])
     _ = backend.refresh(tmp_path, now)
-    context = _Context()
+    events = _Events()
     runtime = SteamContextRuntime(
         tmp_path,
         AsyncioOneShotTimer(),
         _Health(),  # type: ignore[arg-type]
         lambda _kind, _message: None,
-        context,  # type: ignore[arg-type]
+        events,  # type: ignore[arg-type]
         now=lambda: now,
     )
 
     await runtime._report_current(now)  # pyright: ignore[reportPrivateUsage]
 
-    assert len(context.reports) == 1
-    assert context.reports[0]["event_id"] == "current"
-    assert context.reports[0]["expires_at"] == now + timedelta(minutes=5)
+    assert events.emitted == [
+        {
+            "source": "steam-presence",
+            "text": "Steam 在线，没在玩游戏",
+            "at": now,
+            "state": True,
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -195,7 +199,7 @@ async def test_contract_failure_degrades_and_does_not_retry(
         timer,
         health,  # type: ignore[arg-type]
         lambda kind, message: incidents.append((kind, message)),
-        _Context(),  # type: ignore[arg-type]
+        _Events(),  # type: ignore[arg-type]
         now=lambda: now,
     )
     monkeypatch.setattr(
