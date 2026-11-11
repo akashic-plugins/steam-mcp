@@ -11,12 +11,12 @@ from pathlib import Path
 
 import pytest
 from agent.plugins.importer import FreshSourceLoader
-from agent.plugin_composition.bindings import BINDINGS
-from agent.plugin_contracts.tools import ALL_TOOLS, TOOLS
+from plugins.ledger.contract import BINDINGS
+from plugins.tools.contract import ALL_TOOLS, TOOLS
 from agent.plugins.selection import PluginSelection
 from plugins.tools.plugin import open_tool
 from plugins.timer.contract import TimerReceipt, TimerStatus
-from session.log import MessageLog
+from plugins.ledger.log import MessageLog
 from agent.plugins.manager import PluginManager
 from agent.plugins.python_environment import ENVIRONMENT_FILE, PythonEnvironments
 from agent.plugins.static_manifest import load_static_plugin_manifest
@@ -224,15 +224,9 @@ async def test_manager_real_mcp_and_timer_handoff(
     config = _config(data_root)
     _seed_fresh_state(data_root, now)
     config_digest = hashlib.sha256(config.read_bytes()).hexdigest()
-    log = MessageLog(tmp_path / "sessions.db")
+    log = MessageLog(workspace / "sessions.db")
 
-    manager = PluginManager(
-        message_log=log,
-        plugin_dirs=[plugin_root.parent, *(CORE_ROOT / "plugins" / name for name in
-                      ("content", "tools", "mcp", "managed_processes", "timer"))],
-        workspace=workspace,
-        installed_cache_root=tmp_path / "cache",
-    )
+    manager = PluginManager(plugin_dirs=[plugin_root.parent, *(CORE_ROOT / 'plugins' / name for name in ('ledger', 'host_execution', 'content', 'tools', 'mcp', 'managed_processes', 'timer'))], workspace=workspace, installed_cache_root=tmp_path / 'cache')
     try:
         # 1. The live Fiber starts its context owner when it becomes ready.
         await manager.load_all()
@@ -249,7 +243,7 @@ async def test_manager_real_mcp_and_timer_handoff(
         # 2. Open the actual granted tool and recording MCP process.
         bindings = root.context.require(BINDINGS)
         identity = await root.context.require(TOOLS).bind(target, bindings)
-        async with open_tool(bindings, identity) as tool:
+        async with old.fiber.context.runtime_scope(), open_tool(bindings, identity) as tool:
             call = await tool.invoke("invalid-steam-id", {"steamids": []})
             assert call.outcome == "error"
             assert "at least one Steam ID" in str(call.parts)
