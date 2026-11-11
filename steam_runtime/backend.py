@@ -212,7 +212,6 @@ def wake_context(data_root: Path, now: datetime) -> dict[str, object] | None:
         previous_at, previous_games = _previous_snapshot(connection, aware_now)
         return {
             "observed_at": row["presence_observed_at"],
-            "expires_at": row["presence_expires_at"],
             "presence": presence["presence"],
             "online_status": presence["online_status"],
             "currently_playing": presence["currently_playing"],

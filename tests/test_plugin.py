@@ -36,14 +36,14 @@ class _RecordingMcpServers:
 def test_pure_v3_exports_and_exact_apply() -> None:
     assert plugin.api_version == 3
     assert plugin.name == "steam"
-    assert plugin.version == "3.2.4"
+    assert plugin.version == "3.3.0"
     assert plugin.skill_roots == ("skills",)
     assert tuple(inspect.signature(plugin.apply).parameters) == ("ctx",)
 
 
 @pytest.mark.asyncio
-async def test_apply_keeps_user_mcp_without_eventmail(tmp_path: Path) -> None:
-    root = CompositionRoot("steam:without-eventmail")
+async def test_apply_keeps_user_mcp_without_watch(tmp_path: Path) -> None:
+    root = CompositionRoot("steam:without-watch")
     servers = _RecordingMcpServers()
     await root.context.provide(MCP_SERVERS, cast(McpServers, servers))
     await root.context.provide(TOOLS, ToolCatalog(root.context, Tasks()))
@@ -55,7 +55,7 @@ async def test_apply_keeps_user_mcp_without_eventmail(tmp_path: Path) -> None:
         inject=composable.inject,
         runtime=PluginRuntime(
             plugin_id="steam",
-            generation_id="steam:without-eventmail",
+            generation_id="steam:without-watch",
             plugin_dir=ROOT,
             data_dir=tmp_path / "plugin-data",
             workspace=tmp_path / "workspace",
@@ -76,7 +76,7 @@ def test_static_manifest_declares_the_python_install_input() -> None:
     manifest = load_static_plugin_manifest(ROOT)
 
     assert manifest.name == plugin.name == "steam"
-    assert manifest.version == plugin.version == "3.2.4"
+    assert manifest.version == plugin.version == "3.3.0"
     assert manifest.api_version == plugin.api_version == 3
     assert manifest.requirements == ("mcp/requirements.txt",)
     assert manifest.python[0].runtime_root == "mcp"

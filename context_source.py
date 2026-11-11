@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -10,12 +10,22 @@ from pathlib import Path
 from agent.plugin_composition import HealthHandle
 from plugins.timer.contract import OneShotTimer, TimerHandle, TimerStatus
 
-from plugins.eventmail.contract import BoundContextSource
+from plugins.watch.contract import WatchEvents
 from .steam_runtime import backend
 
 
+# 只说对值班有意义的那一层：在玩什么、在线、离线；状态没变时值班不会记成新事件。
+def _presence_text(current: Mapping[str, object]) -> str:
+    playing = current.get("currently_playing")
+    if playing:
+        return f"正在玩 {playing}"
+    if current.get("presence") == "offline":
+        return "Steam 离线"
+    return "Steam 在线，没在玩游戏"
+
+
 class SteamContextRuntime:
-    """用 Timer 刷新 Steam current state，并上报可过期 Context。"""
+    """用 Timer 刷新 Steam current state，并把当前状态交给值班。"""
 
     def __init__(
         self,
@@ -23,17 +33,15 @@ class SteamContextRuntime:
         timers: OneShotTimer,
         health: HealthHandle,
         report_incident: Callable[[str, str], object],
-        context: BoundContextSource,
+        events: WatchEvents,
         *,
         now: Callable[[], datetime] | None = None,
-        current_state: Callable[[Mapping[str, object]], Awaitable[None]] | None = None,
     ) -> None:
-        self._current_state = current_state
         self._data_root = data_root
         self._timers = timers
         self._health = health
         self._report_incident = report_incident
-        self._context = context
+        self._events = events
         self._now = now or (lambda: datetime.now(UTC))
         self._handle: TimerHandle | None = None
         self._task: asyncio.Task[None] | None = None
@@ -136,20 +144,24 @@ class SteamContextRuntime:
         if not self._closed and next_due is not None:
             self._arm(next_due)
 
+    # 把当前状态交给值班；值班不可用不影响 Steam 状态本身的刷新。
     async def _report_current(self, now: datetime) -> None:
         current = await asyncio.to_thread(backend.wake_context, self._data_root, now)
         if current is None:
             return
         observed_at = datetime.fromisoformat(str(current["observed_at"]))
-        expires_at = datetime.fromisoformat(str(current["expires_at"]))
-        _ = await self._context.report(
-            event_id="current",
-            payload=current,
-            observed_at=observed_at,
-            expires_at=expires_at,
-        )
-        if self._current_state is not None:
-            await self._current_state(current)
+        try:
+            _ = await self._events.emit(
+                "steam-presence",
+                text=_presence_text(current),
+                at=observed_at,
+                state=True,
+            )
+        except Exception as error:
+            _ = self._report_incident(
+                "steam_watch_emit_failed",
+                f"{type(error).__name__}: {error}"[:300],
+            )
 
     def _aware_now(self) -> datetime:
         value = self._now()
