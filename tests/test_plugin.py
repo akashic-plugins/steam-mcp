@@ -36,7 +36,7 @@ class _RecordingMcpServers:
 def test_pure_v3_exports_and_exact_apply() -> None:
     assert plugin.api_version == 3
     assert plugin.name == "steam"
-    assert plugin.version == "3.2.3"
+    assert plugin.version == "3.2.4"
     assert plugin.skill_roots == ("skills",)
     assert tuple(inspect.signature(plugin.apply).parameters) == ("ctx",)
 
@@ -76,7 +76,7 @@ def test_static_manifest_declares_the_python_install_input() -> None:
     manifest = load_static_plugin_manifest(ROOT)
 
     assert manifest.name == plugin.name == "steam"
-    assert manifest.version == plugin.version == "3.2.3"
+    assert manifest.version == plugin.version == "3.2.4"
     assert manifest.api_version == plugin.api_version == 3
     assert manifest.requirements == ("mcp/requirements.txt",)
     assert manifest.python[0].runtime_root == "mcp"

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -26,7 +26,9 @@ class SteamContextRuntime:
         context: BoundContextSource,
         *,
         now: Callable[[], datetime] | None = None,
+        current_state: Callable[[Mapping[str, object]], Awaitable[None]] | None = None,
     ) -> None:
+        self._current_state = current_state
         self._data_root = data_root
         self._timers = timers
         self._health = health
@@ -146,6 +148,8 @@ class SteamContextRuntime:
             observed_at=observed_at,
             expires_at=expires_at,
         )
+        if self._current_state is not None:
+            await self._current_state(current)
 
     def _aware_now(self) -> datetime:
         value = self._now()
