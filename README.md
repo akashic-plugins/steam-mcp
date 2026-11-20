@@ -7,8 +7,7 @@ Core Timer ──触发──> Steam shared domain ──覆盖──> current p
                               │
                               └──有意义变化──追加──> game snapshot history
 
-Wake BeforeTurn ──只读 fresh state──> extra_hints
-Passive BeforeTurn ──────────────────> 不变
+Core Timer 每次刷新后 ──state 事件──> 值班（watch，WATCH_EVENTS）
 用户 Turn ──调用 Steam MCP───────────> 主动查询 Steam API
 ```
 
@@ -18,8 +17,9 @@ Passive BeforeTurn ──────────────────> 不�
   snapshot 特权工具。
 - `TIMERS`：正式稳定 Root 独占一个 one-shot Timer。presence 每 5 分钟刷新；
   网络瞬时失败记录结构化 Incident，并在 60 秒后重试。
-- `turn.context_prepared`：只在 `channel=wake` 且 current presence 仍 fresh 时
-  append 一个普通 hint；不会 abort、替换 prompt 或影响 passive Turn。
+- `WATCH_EVENTS`（可选）：值班存在时，每次刷新后向它 `emit("steam-presence",
+  text=..., state=True)`，文本只写"正在玩 X / Steam 离线 / Steam 在线，没在玩游戏"；
+  状态没变时值班不会记成新事件。值班不在时不启动刷新。
 
 Steam SQLite 是唯一 domain state owner：
 
@@ -56,9 +56,9 @@ freshness，避免把历史采样频率和当前状态时效揉成一个概念�
 
 ## 验证
 
-CI 固定 Core `9da3a988a2bf62b0f550bd4f6bb98c4eeb1f56f5`。测试覆盖真实
+CI 固定 Core `d64545463faf5500ff651fa7337229c01b366393`。测试覆盖真实
 PluginManager + stdio MCP + Timer、candidate 零正式 write set、reload Timer
-换班、网络失败恢复、fresh/stale/unknown、Wake/passive 分流、历史保留、日志轮转、
+换班、网络失败恢复、fresh/stale/unknown、状态事件交给值班、历史保留、日志轮转、
 pyright、compileall、Plugin API contract 和 `git diff --check`。
 
 ### 用户工具发现

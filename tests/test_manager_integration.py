@@ -11,15 +11,16 @@ from pathlib import Path
 
 import pytest
 from agent.plugins.importer import FreshSourceLoader
-from agent.plugin_composition.bindings import BINDINGS
-from agent.plugin_contracts.tools import ALL_TOOLS, TOOLS
+from plugins.ledger.contract import BINDINGS
+from plugins.tools.contract import ALL_TOOLS, TOOLS
 from agent.plugins.selection import PluginSelection
 from plugins.tools.plugin import open_tool
 from plugins.timer.contract import TimerReceipt, TimerStatus
-from session.log import MessageLog
+from plugins.ledger.log import MessageLog
 from agent.plugins.manager import PluginManager
 from agent.plugins.python_environment import ENVIRONMENT_FILE, PythonEnvironments
 from agent.plugins.static_manifest import load_static_plugin_manifest
+from agent.plugin_composition.config_input import save_config, save_credential
 
 from steam_runtime import backend
 
@@ -78,14 +79,39 @@ async def _eventually(predicate) -> None:
     raise AssertionError("condition did not settle")
 
 
+_WATCH_STUB = """from agent.plugin_composition import Context
+
+from .contract import WATCH_EVENTS
+
+api_version = 3
+name = "watch"
+version = "0.0.0"
+desc = "测试用值班：只收下事件"
+
+
+class _Events:
+    async def emit(self, source: str, **_kwargs: object) -> str:
+        return source
+
+
+async def apply(ctx: Context) -> None:
+    _ = await ctx.provide(WATCH_EVENTS, _Events())
+"""
+
+
+# 用 Core 真实的值班合同加一个只收事件的提供方，避免拉起值班自己的全部依赖。
+def _stage_watch_stub(target: Path) -> None:
+    target.mkdir(parents=True)
+    _ = shutil.copy(CORE_ROOT / "plugins" / "watch" / "contract.py", target / "contract.py")
+    (target / "__init__.py").write_text("", encoding="utf-8")
+    (target / "plugin.py").write_text(_WATCH_STUB, encoding="utf-8")
+
+
 def _stage_plugin(tmp_path: Path) -> Path:
     """复制真实 Steam 插件并链接调用方声明的 artifact 运行时。"""
 
     runtime = Path(os.environ["AKASHIC_PLUGIN_FIXTURE_PYTHON"]).parent.parent
-    shutil.copytree(
-        CORE_ROOT / "plugins" / "eventmail",
-        tmp_path / "plugins" / "eventmail",
-    )
+    _stage_watch_stub(tmp_path / "plugins" / "watch")
     source = tmp_path / "plugins" / "steam"
     shutil.copytree(
         ROOT,
@@ -145,20 +171,15 @@ def test_stage_plugin_requires_fixture_python(
     assert not (tmp_path / "plugins").exists()
 
 
+# 经正式配置入口写入：凭据进私有目录，插件配置只带引用，运行文件由插件激活时派生。
 def _config(data_root: Path) -> Path:
     data_root.mkdir(parents=True, exist_ok=True)
-    path = data_root / "steam_mcp_config.json"
-    path.write_text(
-        json.dumps(
-            {
-                "steam_api_key": "test-only",
-                "steam_id": "76561198000000000",
-                "snapshot_interval_seconds": 3600,
-            }
-        ),
-        encoding="utf-8",
-    )
-    return path
+    save_config(data_root, {
+        "steam_api_key": save_credential(data_root, "test-only"),
+        "steam_id": "76561198000000000",
+        "snapshot_interval_seconds": 3600,
+    })
+    return data_root / "steam_mcp_config.json"
 
 
 def _seed_fresh_state(data_root: Path, now: datetime) -> None:
@@ -223,16 +244,9 @@ async def test_manager_real_mcp_and_timer_handoff(
     data_root = workspace / "plugin-data" / "steam-builtin"
     config = _config(data_root)
     _seed_fresh_state(data_root, now)
-    config_digest = hashlib.sha256(config.read_bytes()).hexdigest()
-    log = MessageLog(tmp_path / "sessions.db")
+    log = MessageLog(workspace / "sessions.db")
 
-    manager = PluginManager(
-        message_log=log,
-        plugin_dirs=[plugin_root.parent, *(CORE_ROOT / "plugins" / name for name in
-                      ("content", "tools", "mcp", "managed_processes", "timer"))],
-        workspace=workspace,
-        installed_cache_root=tmp_path / "cache",
-    )
+    manager = PluginManager(plugin_dirs=[plugin_root.parent, *(CORE_ROOT / 'plugins' / name for name in ('ledger', 'host_execution', 'content', 'tools', 'mcp', 'managed_processes', 'timer'))], workspace=workspace, installed_cache_root=tmp_path / 'cache')
     try:
         # 1. The live Fiber starts its context owner when it becomes ready.
         await manager.load_all()
@@ -242,14 +256,15 @@ async def test_manager_real_mcp_and_timer_handoff(
         refs = root.context.require(ALL_TOOLS)().refs
         target = next(ref for ref in refs if ref.name == "mcp_steam__get_player_summaries")
         assert "risk" not in target.description
-        await manager.start_runtime()
         await _eventually(lambda: sum(len(timer.handles) for timer in timers) == 1)
+        assert json.loads(config.read_text())["steam_api_key"] == "test-only"
+        config_digest = hashlib.sha256(config.read_bytes()).hexdigest()
         formal_timer = next(timer for timer in timers if timer.handles)
 
         # 2. Open the actual granted tool and recording MCP process.
         bindings = root.context.require(BINDINGS)
         identity = await root.context.require(TOOLS).bind(target, bindings)
-        async with open_tool(bindings, identity) as tool:
+        async with old.fiber.context.runtime_scope(), open_tool(bindings, identity) as tool:
             call = await tool.invoke("invalid-steam-id", {"steamids": []})
             assert call.outcome == "error"
             assert "at least one Steam ID" in str(call.parts)
