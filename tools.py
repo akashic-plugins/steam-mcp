@@ -46,7 +46,7 @@ async def register_tools(ctx: Context, *, description: str) -> None:
     """发布随源码交付的发现目录；只有实际调用才打开 MCP。"""
     catalog = json.loads(Path(__file__).with_name("tool_catalog.json").read_text())
     tools = ctx.require(TOOLS)
-    await tools.declare_group(ctx, description=description)
+    await tools.declare_group(ctx, description=description, icon="gamepad-2")
     refs = [await _register_tool(ctx, item) for item in catalog]
     await ctx.provide(STEAM_TOOLS, tools.view(*refs))
 
